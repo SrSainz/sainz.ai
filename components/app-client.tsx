@@ -32,8 +32,10 @@ const DEFAULT_GOALS: Goals = {
 };
 const GOALS_KEY = "sainzcal_goals_v1";
 const PROFILE_KEY = "sainzcal_health_profile_v1";
+const PORTION_MEMORY_KEY = "sainzcal_portion_memory_v1";
+const LOW_CONFIDENCE_THRESHOLD = 0.7;
 
-type Tab = "home" | "history";
+type Tab = "home" | "history" | "health";
 type ScanPhase = "picker" | "analyzing" | "result";
 
 export default function AppClient() {
@@ -51,6 +53,8 @@ export default function AppClient() {
   const [analysisModel, setAnalysisModel] = useState<string>("");
   const [saveError, setSaveError] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
+  const [requiresSaveConfirmation, setRequiresSaveConfirmation] = useState(false);
+  const [saveConfirmed, setSaveConfirmed] = useState(true);
   const [goals, setGoals] = useState<Goals>(DEFAULT_GOALS);
   const [showGoals, setShowGoals] = useState(false);
   const [profile, setProfile] = useState<HealthProfile | null>(null);
@@ -63,9 +67,16 @@ export default function AppClient() {
 
   useEffect(() => {
     setMeals(loadMeals());
-    const parsed = loadGoals();
-    setGoals(parsed);
-    setProfile(loadHealthProfile());
+    const parsedGoals = loadGoals();
+    const storedProfile = loadHealthProfile();
+    setProfile(storedProfile);
+    if (storedProfile) {
+      const recommended = buildGoalsFromProfile(storedProfile);
+      setGoals(recommended);
+      saveGoals(recommended);
+    } else {
+      setGoals(parsedGoals);
+    }
   }, []);
 
   const todayMeals = useMemo(() => meals.filter((meal) => isToday(meal.date)), [meals]);
@@ -85,6 +96,8 @@ export default function AppClient() {
     setAnalysisModel("");
     setSaveError("");
     setIsSaving(false);
+    setRequiresSaveConfirmation(false);
+    setSaveConfirmed(true);
   }
 
   function closeScan() {
@@ -96,6 +109,8 @@ export default function AppClient() {
     setAnalysisModel("");
     setSaveError("");
     setIsSaving(false);
+    setRequiresSaveConfirmation(false);
+    setSaveConfirmed(true);
   }
 
   async function onImagePicked(event: ChangeEvent<HTMLInputElement>) {
@@ -140,6 +155,9 @@ export default function AppClient() {
       }
 
       setDetectedFoods(foods);
+      const hasLowConfidence = foods.some((food) => food.confidence < LOW_CONFIDENCE_THRESHOLD);
+      setRequiresSaveConfirmation(hasLowConfidence);
+      setSaveConfirmed(!hasLowConfidence);
       if (payload.warning) setScanWarning(payload.warning);
       setAnalysisSource(payload.source || "gemini");
       setAnalysisModel(payload.model || "");
@@ -154,31 +172,45 @@ export default function AppClient() {
 
   function updateFoodGrams(id: string, grams: number) {
     if (!Number.isFinite(grams) || grams <= 0) return;
-    setDetectedFoods((prev) =>
-      prev.map((food) => {
-        if (food.id !== id) return food;
-        const factor = grams / Math.max(food.estimatedGrams, 1);
-        return {
-          ...food,
-          estimatedGrams: grams,
-          nutrition: {
-            calories: food.nutrition.calories * factor,
-            protein: food.nutrition.protein * factor,
-            carbs: food.nutrition.carbs * factor,
-            fat: food.nutrition.fat * factor,
-            fiber: food.nutrition.fiber * factor
-          }
-        };
-      })
-    );
+    const nextFoods = detectedFoods.map((food) => {
+      if (food.id !== id) return food;
+      const factor = grams / Math.max(food.estimatedGrams, 1);
+      rememberPortionAdjustment(food.name, food.estimatedGrams, grams);
+      return {
+        ...food,
+        estimatedGrams: grams,
+        nutrition: {
+          calories: food.nutrition.calories * factor,
+          protein: food.nutrition.protein * factor,
+          carbs: food.nutrition.carbs * factor,
+          fat: food.nutrition.fat * factor,
+          fiber: food.nutrition.fiber * factor
+        }
+      };
+    });
+
+    setDetectedFoods(nextFoods);
+    if (requiresSaveConfirmation) {
+      setSaveConfirmed(true);
+    }
   }
 
   function removeFood(id: string) {
-    setDetectedFoods((prev) => prev.filter((food) => food.id !== id));
+    const nextFoods = detectedFoods.filter((food) => food.id !== id);
+    setDetectedFoods(nextFoods);
+    const stillNeedsConfirmation = nextFoods.some((food) => food.confidence < LOW_CONFIDENCE_THRESHOLD);
+    setRequiresSaveConfirmation(stillNeedsConfirmation);
+    if (!stillNeedsConfirmation) {
+      setSaveConfirmed(true);
+    }
   }
 
   function saveCurrentMeal() {
     if (detectedFoods.length === 0 || isSaving) return;
+    if (requiresSaveConfirmation && !saveConfirmed) {
+      setSaveError("Confirma las porciones antes de guardar. La confianza de la IA es baja en algunos alimentos.");
+      return;
+    }
     setIsSaving(true);
     setSaveError("");
 
@@ -235,13 +267,28 @@ export default function AppClient() {
             onOpenGoals={() => setShowGoals(true)}
             onOpenProfile={() => setShowHealthProfile(true)}
           />
-        ) : (
+        ) : null}
+        {tab === "history" ? (
           <HistoryScreen
             groups={historyGroups}
             onOpenDetail={setDetailMeal}
             onDelete={removeMealFromHistory}
           />
-        )}
+        ) : null}
+        {tab === "health" ? (
+          <HealthScreen
+            profile={profile}
+            goals={goals}
+            todayNutrition={todayNutrition}
+            onOpenProfile={() => setShowHealthProfile(true)}
+            onApplyProfileGoals={() => {
+              if (!profile) return;
+              const recommended = buildGoalsFromProfile(profile);
+              setGoals(recommended);
+              saveGoals(recommended);
+            }}
+          />
+        ) : null}
       </main>
 
       <nav className="tabbar">
@@ -267,6 +314,15 @@ export default function AppClient() {
             <span>{"\u{1F4CA}"}</span>
             <span className="tiny">Historial</span>
           </button>
+
+          <button
+            className={`tab-btn ${tab === "health" ? "active" : ""}`}
+            type="button"
+            onClick={() => setTab("health")}
+          >
+            <span>{"\u{2764}\u{FE0F}"}</span>
+            <span className="tiny">Salud</span>
+          </button>
         </div>
       </nav>
 
@@ -280,6 +336,8 @@ export default function AppClient() {
           error={scanError}
           saveError={saveError}
           isSaving={isSaving}
+          requiresSaveConfirmation={requiresSaveConfirmation}
+          saveConfirmed={saveConfirmed}
           source={analysisSource}
           model={analysisModel}
           cameraInputRef={cameraInputRef}
@@ -290,6 +348,7 @@ export default function AppClient() {
           onUpdateGrams={updateFoodGrams}
           onDeleteFood={removeFood}
           onSave={saveCurrentMeal}
+          onSaveConfirmedChange={setSaveConfirmed}
           onRetake={() => {
             setScanPhase("picker");
             setDetectedFoods([]);
@@ -299,6 +358,8 @@ export default function AppClient() {
             setAnalysisSource("");
             setAnalysisModel("");
             setMealName(mealPeriodLabel(new Date()));
+            setRequiresSaveConfirmation(false);
+            setSaveConfirmed(true);
           }}
         />
       )}
@@ -326,6 +387,9 @@ export default function AppClient() {
           onSave={(nextProfile) => {
             setProfile(nextProfile);
             saveHealthProfile(nextProfile);
+            const recommended = buildGoalsFromProfile(nextProfile);
+            setGoals(recommended);
+            saveGoals(recommended);
             setShowHealthProfile(false);
           }}
         />
@@ -492,6 +556,115 @@ function HomeScreen({
   );
 }
 
+function HealthScreen({
+  profile,
+  goals,
+  todayNutrition,
+  onOpenProfile,
+  onApplyProfileGoals
+}: {
+  profile: HealthProfile | null;
+  goals: Goals;
+  todayNutrition: NutritionInfo;
+  onOpenProfile: () => void;
+  onApplyProfileGoals: () => void;
+}) {
+  const health = evaluateHealthStatus(todayNutrition, goals, profile);
+  const recommended = profile ? buildGoalsFromProfile(profile) : null;
+
+  return (
+    <>
+      <header style={{ marginBottom: "1rem" }}>
+        <div className="brand-chip">Sainz.ai</div>
+        <h1 className="screen-title">Perfil de salud</h1>
+        <p className="muted" style={{ margin: "0.35rem 0 0" }}>
+          IMC, metabolismo y objetivos ajustados a tu perfil.
+        </p>
+      </header>
+
+      <section className="card health-focus-card">
+        <div className="section-head">
+          <h2 style={{ margin: 0 }}>Estado general</h2>
+          <span className={`status-chip ${health.dietHealthy && health.bmi.isHealthy ? "ok" : "warn"}`}>
+            {health.dietHealthy ? "Dieta bien" : "Dieta mejorable"}
+          </span>
+        </div>
+        {profile ? (
+          <>
+            <div className="health-grid">
+              <div className="health-cell">
+                <div className="muted tiny">IMC</div>
+                <div className="health-value">{health.bmi.value.toFixed(1)}</div>
+                <div className="tiny muted">{health.bmi.label}</div>
+              </div>
+              <div className="health-cell">
+                <div className="muted tiny">TDEE estimado</div>
+                <div className="health-value">{Math.round(health.tdee)} kcal</div>
+                <div className="tiny muted">gasto diario</div>
+              </div>
+              <div className="health-cell">
+                <div className="muted tiny">Hoy</div>
+                <div className={`health-value ${health.dietHealthy ? "text-ok" : "text-warn"}`}>
+                  {health.dietHealthy ? "Saludable" : "Mejorable"}
+                </div>
+                <div className="tiny muted">{Math.round(todayNutrition.calories)} kcal</div>
+              </div>
+            </div>
+            <p className="muted" style={{ margin: "0.8rem 0 0", lineHeight: 1.45 }}>
+              {health.message}
+            </p>
+          </>
+        ) : (
+          <p className="muted" style={{ margin: 0 }}>
+            Completa tu perfil para calcular IMC y recomendaciones.
+          </p>
+        )}
+      </section>
+
+      <section className="card" style={{ marginTop: "1rem" }}>
+        <div className="section-head">
+          <h2 style={{ margin: 0 }}>Objetivos recomendados</h2>
+          <span className="muted tiny">segun perfil</span>
+        </div>
+        {recommended ? (
+          <>
+            <div className="goal-grid">
+              <div className="goal-cell">
+                <span className="tiny muted">Calorias</span>
+                <strong>{Math.round(recommended.calories)} kcal</strong>
+              </div>
+              <div className="goal-cell">
+                <span className="tiny muted">Proteina</span>
+                <strong>{Math.round(recommended.protein)} g</strong>
+              </div>
+              <div className="goal-cell">
+                <span className="tiny muted">Carbohidratos</span>
+                <strong>{Math.round(recommended.carbs)} g</strong>
+              </div>
+              <div className="goal-cell">
+                <span className="tiny muted">Grasa</span>
+                <strong>{Math.round(recommended.fat)} g</strong>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.85rem" }}>
+              <button type="button" className="btn secondary" onClick={onOpenProfile}>
+                Editar perfil
+              </button>
+              <button type="button" className="btn primary" onClick={onApplyProfileGoals}>
+                Aplicar objetivos
+              </button>
+            </div>
+          </>
+        ) : (
+          <button type="button" className="btn primary" onClick={onOpenProfile}>
+            Completar perfil
+          </button>
+        )}
+      </section>
+    </>
+  );
+}
+
 function HistoryScreen({
   groups,
   onOpenDetail,
@@ -578,6 +751,8 @@ function ScanModal({
   error,
   saveError,
   isSaving,
+  requiresSaveConfirmation,
+  saveConfirmed,
   source,
   model,
   cameraInputRef,
@@ -588,6 +763,7 @@ function ScanModal({
   onUpdateGrams,
   onDeleteFood,
   onSave,
+  onSaveConfirmedChange,
   onRetake
 }: {
   phase: ScanPhase;
@@ -598,6 +774,8 @@ function ScanModal({
   error: string;
   saveError: string;
   isSaving: boolean;
+  requiresSaveConfirmation: boolean;
+  saveConfirmed: boolean;
   source: string;
   model: string;
   cameraInputRef: React.RefObject<HTMLInputElement | null>;
@@ -608,6 +786,7 @@ function ScanModal({
   onUpdateGrams: (id: string, grams: number) => void;
   onDeleteFood: (id: string) => void;
   onSave: () => void;
+  onSaveConfirmedChange: (value: boolean) => void;
   onRetake: () => void;
 }) {
   const totals = sumNutrition(foods.map((food) => food.nutrition));
@@ -630,7 +809,8 @@ function ScanModal({
             <section className="card" style={{ marginBottom: "0.8rem" }}>
               <p style={{ marginTop: 0, fontWeight: 700, fontSize: "1.1rem" }}>Haz una foto de tu comida</p>
               <p className="muted">
-                Toma una foto o elige una imagen de tu galeria. Gemini estimara gramos, calorias y macros.
+                Toma una foto o elige una imagen de tu galeria. Modo precision: Gemini detecta alimentos y gramos, y los
+                macros se calculan con base nutricional.
               </p>
               <div className="scan-actions">
                 <button type="button" className="btn primary" onClick={() => cameraInputRef.current?.click()}>
@@ -709,6 +889,7 @@ function ScanModal({
               {foods.length > 0 ? (
                 <div className="quality-chip">Calidad IA: {calidadIA} ({Math.round(avgConfidence * 100)}%)</div>
               ) : null}
+              <div className="precision-chip">Modo precision activo</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem", textAlign: "center" }}>
                 <div>
                   <div className="kcal">{Math.round(totals.calories)}</div>
@@ -765,10 +946,31 @@ function ScanModal({
             </section>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.8rem" }}>
+              {requiresSaveConfirmation ? (
+                <section className="card" style={{ gridColumn: "1 / -1", borderColor: "rgba(255,196,71,0.55)" }}>
+                  <strong style={{ color: "var(--carbs)" }}>Revision recomendada</strong>
+                  <p className="muted" style={{ marginBottom: "0.5rem" }}>
+                    Hay alimentos con confianza baja. Revisa gramos y confirma antes de guardar.
+                  </p>
+                  <label className="confirm-row">
+                    <input
+                      type="checkbox"
+                      checked={saveConfirmed}
+                      onChange={(e) => onSaveConfirmedChange(e.target.checked)}
+                    />
+                    <span>Confirmo que he revisado las porciones</span>
+                  </label>
+                </section>
+              ) : null}
               <button type="button" className="btn secondary" onClick={onRetake}>
                 Repetir
               </button>
-              <button type="button" className="btn primary" onClick={onSave} disabled={isSaving}>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={onSave}
+                disabled={isSaving || (requiresSaveConfirmation && !saveConfirmed)}
+              >
                 {isSaving ? "Guardando..." : "Guardar comida"}
               </button>
             </div>
@@ -1176,32 +1378,38 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
   const name = String(food.name ?? "").trim();
   if (!name) return null;
 
-  const grams = clamp(food.grams, 0, 2000);
-  const calories = clamp(food.calories, 0, 5000);
-  const protein = clamp(food.protein, 0, 500);
-  const carbs = clamp(food.carbs, 0, 500);
-  const fat = clamp(food.fat, 0, 500);
-  const confidence = Math.min(clamp(food.confidence, 0, 100), 97) / 100;
+  const rawGrams = clamp(food.grams, 0, 2000);
+  const aiCalories = clamp(food.calories, 0, 5000);
+  const aiProtein = clamp(food.protein, 0, 500);
+  const aiCarbs = clamp(food.carbs, 0, 500);
+  const aiFat = clamp(food.fat, 0, 500);
+  let confidence = Math.min(clamp(food.confidence, 0, 100), 97) / 100;
   const category = categoryForFood(name);
-  const safeGrams = grams > 0 ? grams : 100;
+  const baseGrams = rawGrams > 0 ? rawGrams : 100;
+  const sanitizedGrams = sanitizePortionGrams(name, category, baseGrams);
+  const personalizedGrams = applyPersonalPortionFactor(name, sanitizedGrams);
+  const safeGrams = clamp(personalizedGrams, 20, 2000);
+  const knownFood = hasKnownFoodMatch(name);
 
-  const aiNutrition: NutritionInfo = {
-    calories,
-    protein,
-    carbs,
-    fat,
-    fiber: 0
-  };
+  const aiAdjustedStrongly = safeGrams / Math.max(baseGrams, 1) > 1.5 || safeGrams / Math.max(baseGrams, 1) < 0.65;
+  if (aiAdjustedStrongly) {
+    confidence = Math.max(0.45, confidence - 0.08);
+  }
 
   const fallback = lookupNutrition(name, safeGrams);
-  const hasAiNutrition = calories + protein + carbs + fat > 0;
-  const isKnown = hasKnownFoodMatch(name);
-  const nutrition = chooseBestNutrition({
-    ai: aiNutrition,
-    fallback,
-    hasAiNutrition,
-    isKnown,
-    confidence
+  const aiNutrition: NutritionInfo = {
+    calories: aiCalories,
+    protein: aiProtein,
+    carbs: aiCarbs,
+    fat: aiFat,
+    fiber: 0
+  };
+  const nutrition = choosePrecisionNutrition({
+    knownFood,
+    aiNutrition,
+    fallbackNutrition: fallback,
+    aiRawGrams: baseGrams,
+    finalGrams: safeGrams
   });
 
   return {
@@ -1214,31 +1422,31 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
   };
 }
 
-function chooseBestNutrition(input: {
-  ai: NutritionInfo;
-  fallback: NutritionInfo;
-  hasAiNutrition: boolean;
-  isKnown: boolean;
-  confidence: number;
+function choosePrecisionNutrition(input: {
+  knownFood: boolean;
+  aiNutrition: NutritionInfo;
+  fallbackNutrition: NutritionInfo;
+  aiRawGrams: number;
+  finalGrams: number;
 }): NutritionInfo {
-  if (!input.hasAiNutrition) return input.fallback;
-  if (!input.isKnown) return input.ai;
+  if (input.knownFood) return input.fallbackNutrition;
 
-  const ai = input.ai;
-  const fallback = input.fallback;
-  const aiCalories = Math.max(ai.calories, 1);
-  const fallbackCalories = Math.max(fallback.calories, 1);
-  const ratio = aiCalories / fallbackCalories;
+  const hasAiValues =
+    input.aiNutrition.calories > 0 || input.aiNutrition.protein > 0 || input.aiNutrition.carbs > 0 || input.aiNutrition.fat > 0;
+  if (!hasAiValues) return input.fallbackNutrition;
 
-  const aiMacros = ai.protein + ai.carbs + ai.fat;
-  const fallbackMacros = fallback.protein + fallback.carbs + fallback.fat;
-  const macroRatio = Math.max(aiMacros, 1) / Math.max(fallbackMacros, 1);
+  const kcalPerGram = input.aiNutrition.calories / Math.max(input.aiRawGrams, 1);
+  const plausibleDensity = kcalPerGram >= 0.2 && kcalPerGram <= 9;
+  if (!plausibleDensity) return input.fallbackNutrition;
 
-  const outlier = ratio > 2.2 || ratio < 0.45 || macroRatio > 2.4 || macroRatio < 0.4;
-  if (outlier && input.confidence < 0.95) {
-    return fallback;
-  }
-  return ai;
+  const scale = input.finalGrams / Math.max(input.aiRawGrams, 1);
+  return {
+    calories: input.aiNutrition.calories * scale,
+    protein: input.aiNutrition.protein * scale,
+    carbs: input.aiNutrition.carbs * scale,
+    fat: input.aiNutrition.fat * scale,
+    fiber: 0
+  };
 }
 
 function sumNutrition(items: NutritionInfo[]): NutritionInfo {
@@ -1475,6 +1683,23 @@ function activityMultiplier(activity: ActivityLevel): number {
   }
 }
 
+function buildGoalsFromProfile(profile: HealthProfile): Goals {
+  const tdee = estimateTdee(profile);
+  const proteinPerKg =
+    profile.activity === "alto" ? 2.0 : profile.activity === "moderado" ? 1.8 : profile.activity === "ligero" ? 1.6 : 1.4;
+  const protein = clamp(profile.weightKg * proteinPerKg, 60, 260);
+  const fat = clamp((tdee * 0.28) / 9, 35, 130);
+  const remainingForCarbs = tdee - protein * 4 - fat * 9;
+  const carbs = clamp(remainingForCarbs / 4, 80, 450);
+
+  return {
+    calories: Math.round(tdee),
+    protein: Math.round(protein),
+    carbs: Math.round(carbs),
+    fat: Math.round(fat)
+  };
+}
+
 function mergeSimilarFoods(foods: DetectedFood[]): DetectedFood[] {
   const merged = new Map<string, DetectedFood>();
 
@@ -1557,6 +1782,106 @@ function normalizeFoodKey(name: string): string {
 
   if (!tokens.length) return "comida";
   return tokens.slice(0, 3).join(" ");
+}
+
+function sanitizePortionGrams(name: string, category: DetectedFood["category"], grams: number): number {
+  const key = normalizeFoodKey(name);
+  let min = 20;
+  let max = 900;
+
+  switch (category) {
+    case "fruit":
+      min = 40;
+      max = 350;
+      break;
+    case "vegetable":
+      min = 30;
+      max = 450;
+      break;
+    case "protein":
+      min = 35;
+      max = 500;
+      break;
+    case "carb":
+      min = 40;
+      max = 600;
+      break;
+    case "dairy":
+      min = 30;
+      max = 450;
+      break;
+    case "fat":
+      min = 8;
+      max = 120;
+      break;
+    case "beverage":
+      min = 50;
+      max = 700;
+      break;
+    default:
+      min = 20;
+      max = 900;
+  }
+
+  if (containsAny(key, ["platano", "banana"])) return clamp(grams, 70, 220);
+  if (containsAny(key, ["manzana", "apple"])) return clamp(grams, 90, 280);
+  if (containsAny(key, ["naranja", "orange"])) return clamp(grams, 90, 320);
+  if (containsAny(key, ["huevo", "egg"])) return clamp(grams, 35, 120);
+  if (containsAny(key, ["arroz", "rice"])) return clamp(grams, 50, 450);
+  if (containsAny(key, ["pollo", "chicken"])) return clamp(grams, 60, 450);
+  if (containsAny(key, ["brocoli", "broccoli"])) return clamp(grams, 40, 300);
+
+  return clamp(grams, min, max);
+}
+
+function containsAny(value: string, words: string[]): boolean {
+  return words.some((word) => value.includes(word));
+}
+
+function loadPortionMemory(): Record<string, number> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(PORTION_MEMORY_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const next: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        next[key] = clamp(n, 0.75, 1.25);
+      }
+    }
+    return next;
+  } catch {
+    return {};
+  }
+}
+
+function savePortionMemory(map: Record<string, number>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PORTION_MEMORY_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage write errors and keep app usable.
+  }
+}
+
+function applyPersonalPortionFactor(name: string, grams: number): number {
+  const key = normalizeFoodKey(name);
+  const memory = loadPortionMemory();
+  const factor = memory[key] ?? 1;
+  return grams * factor;
+}
+
+function rememberPortionAdjustment(name: string, fromGrams: number, toGrams: number): void {
+  if (fromGrams <= 0 || toGrams <= 0) return;
+  const key = normalizeFoodKey(name);
+  const newFactor = clamp(toGrams / fromGrams, 0.6, 1.6);
+  const memory = loadPortionMemory();
+  const current = memory[key] ?? 1;
+  const smoothed = clamp(current * 0.7 + newFactor * 0.3, 0.75, 1.25);
+  memory[key] = smoothed;
+  savePortionMemory(memory);
 }
 
 function pickDisplayName(a: string, b: string): string {

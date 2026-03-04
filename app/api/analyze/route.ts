@@ -28,6 +28,8 @@ Para cada alimento devuelve:
 Reglas importantes:
 - Devuelve SOLO JSON valido.
 - Sin markdown.
+- Si dudas de un alimento o porcion, baja confidence.
+- Prioriza precision de gramos: evita redondear todo a 100g.
 - Si aparece una unica pieza de fruta (por ejemplo un platano), usa gramos realistas de una unidad (aprox. 90-160 g comestibles).
 - No inventes alimentos que no se ven.
 - Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.`;
@@ -124,7 +126,12 @@ async function callGemini(input: {
             }
           ]
         }
-      ]
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        topP: 0.9,
+        maxOutputTokens: 900
+      }
     };
 
     const response = await fetch(url, {
