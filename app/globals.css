@@ -313,8 +313,9 @@ input {
   grid-template-columns: 1fr auto 1fr 1fr;
   align-items: center;
   gap: 0.2rem;
-  padding: 0.8rem 1rem 1.5rem;
+  padding: 0.65rem 0.9rem 1.25rem;
   pointer-events: auto;
+  overflow: visible;
 }
 
 .tab-btn {
@@ -334,14 +335,17 @@ input {
 
 .scan-main-btn {
   border: 0;
-  width: 68px;
-  height: 68px;
+  width: 62px;
+  height: 62px;
   border-radius: 999px;
   background: var(--neon);
   color: #101010;
   font-size: 1.5rem;
   box-shadow: 0 0 35px rgba(166, 239, 89, 0.45);
-  transform: translateY(-14px);
+  transform: translateY(-7px);
+  align-self: start;
+  position: relative;
+  z-index: 2;
   cursor: pointer;
 }
 
@@ -459,5 +463,19 @@ input {
 @media (max-width: 600px) {
   .app-shell {
     padding-bottom: 7.3rem;
+  }
+
+  .tabbar-inner {
+    padding-inline: 0.7rem;
+  }
+
+  .tab-btn {
+    min-width: 56px;
+  }
+
+  .scan-main-btn {
+    width: 58px;
+    height: 58px;
+    transform: translateY(-5px);
   }
 }
