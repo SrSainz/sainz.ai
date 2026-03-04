@@ -265,7 +265,6 @@ export default function AppClient() {
             goals={goals}
             profile={profile}
             onOpenGoals={() => setShowGoals(true)}
-            onOpenProfile={() => setShowHealthProfile(true)}
           />
         ) : null}
         {tab === "history" ? (
@@ -404,8 +403,7 @@ function HomeScreen({
   progressStyle,
   goals,
   profile,
-  onOpenGoals,
-  onOpenProfile
+  onOpenGoals
 }: {
   todayMeals: MealLog[];
   todayNutrition: NutritionInfo;
@@ -413,7 +411,6 @@ function HomeScreen({
   goals: Goals;
   profile: HealthProfile | null;
   onOpenGoals: () => void;
-  onOpenProfile: () => void;
 }) {
   const greeting = getGreeting();
   const remaining = Math.max(0, goals.calories - todayNutrition.calories);
@@ -442,10 +439,7 @@ function HomeScreen({
           {"\u{1F33F}"}
         </div>
       </header>
-      <div style={{ marginBottom: "0.8rem", display: "flex", justifyContent: "flex-end", gap: "0.5rem", flexWrap: "wrap" }}>
-        <button type="button" className="btn secondary" onClick={onOpenProfile}>
-          Perfil salud
-        </button>
+      <div style={{ marginBottom: "0.8rem", display: "flex", justifyContent: "center" }}>
         <button type="button" className="btn secondary" onClick={onOpenGoals}>
           Objetivos
         </button>
