@@ -74,6 +74,18 @@ input {
   margin-bottom: 0.65rem;
 }
 
+.quality-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.74rem;
+  color: #cfe8ff;
+  border: 1px solid rgba(98, 147, 255, 0.35);
+  background: rgba(98, 147, 255, 0.12);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  margin-bottom: 0.65rem;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -271,6 +283,11 @@ input {
 .btn.secondary {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
+}
+
+.btn:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
 }
 
 .scan-actions {

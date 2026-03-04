@@ -3,6 +3,7 @@ import { GeminiFoodResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
+const MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-2.0-flash"];
 
 type GeminiGenerateResponse = {
   candidates?: Array<{
@@ -85,7 +86,7 @@ export async function POST(req: NextRequest) {
 
       const normalized = normalizeGeminiResponse(parsed.data);
       if (normalized.foods.length > 0) {
-        return NextResponse.json({ ...normalized, source: "gemini", model: GEMINI_MODEL });
+        return NextResponse.json({ ...normalized, source: "gemini", model: parsed.model });
       }
       lastError = "No se detectaron alimentos.";
     }
@@ -105,47 +106,66 @@ async function callGemini(input: {
   imageBase64: string;
   mimeType: string;
   prompt: string;
-}): Promise<{ ok: true; data: GeminiFoodResponse } | { ok: false; error: string }> {
-  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${input.apiKey}`;
-  const payload = {
-    contents: [
-      {
-        parts: [
-          { text: input.prompt },
-          {
-            inline_data: {
-              mime_type: input.mimeType,
-              data: input.imageBase64
+}): Promise<{ ok: true; data: GeminiFoodResponse; model: string } | { ok: false; error: string }> {
+  let lastError = "Gemini no devolvio respuesta valida.";
+
+  for (const model of getModelCandidates()) {
+    const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(model)}:generateContent?key=${input.apiKey}`;
+    const payload = {
+      contents: [
+        {
+          parts: [
+            { text: input.prompt },
+            {
+              inline_data: {
+                mime_type: input.mimeType,
+                data: input.imageBase64
+              }
             }
-          }
-        ]
+          ]
+        }
+      ]
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store"
+    });
+
+    const rawText = await response.text();
+    if (!response.ok) {
+      const bestError = tryExtractError(rawText) ?? `Gemini API HTTP ${response.status}`;
+      lastError = bestError;
+      if (shouldTryNextModel(bestError, response.status)) {
+        continue;
       }
-    ]
-  };
+      return { ok: false, error: bestError };
+    }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store"
-  });
+    const envelope = safeJsonParse<GeminiGenerateResponse>(rawText);
+    if (!envelope) {
+      lastError = "Gemini devolvio un sobre JSON invalido.";
+      continue;
+    }
 
-  const rawText = await response.text();
-  if (!response.ok) {
-    const bestError = tryExtractError(rawText) ?? `Gemini API HTTP ${response.status}`;
-    return { ok: false, error: bestError };
+    const contentText = envelope.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim();
+    if (!contentText) {
+      lastError = "Gemini no devolvio contenido de texto.";
+      continue;
+    }
+
+    const parsed = parseFoodJson(contentText);
+    if (!parsed) {
+      lastError = "Gemini devolvio texto no JSON.";
+      continue;
+    }
+
+    return { ok: true, data: parsed, model };
   }
 
-  const envelope = safeJsonParse<GeminiGenerateResponse>(rawText);
-  if (!envelope) return { ok: false, error: "Gemini devolvio un sobre JSON invalido." };
-
-  const contentText = envelope.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim();
-  if (!contentText) return { ok: false, error: "Gemini no devolvio contenido de texto." };
-
-  const parsed = parseFoodJson(contentText);
-  if (!parsed) return { ok: false, error: "Gemini devolvio texto no JSON." };
-
-  return { ok: true, data: parsed };
+  return { ok: false, error: lastError };
 }
 
 function parseFoodJson(raw: string): GeminiFoodResponse | null {
@@ -247,5 +267,24 @@ function shouldRetry(message: string): boolean {
     check.includes("invalid") ||
     check.includes("429") ||
     check.includes("unavailable")
+  );
+}
+
+function getModelCandidates(): string[] {
+  const unique = new Set<string>();
+  [GEMINI_MODEL, ...MODEL_FALLBACKS].forEach((model) => {
+    if (model && model.trim()) unique.add(model.trim());
+  });
+  return [...unique];
+}
+
+function shouldTryNextModel(message: string, status: number): boolean {
+  const check = message.toLowerCase();
+  return (
+    status === 404 ||
+    check.includes("not found") ||
+    check.includes("not supported") ||
+    check.includes("unknown model") ||
+    check.includes("is not found for api version")
   );
 }

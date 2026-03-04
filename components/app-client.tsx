@@ -2,7 +2,7 @@
 
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { categoryEmoji, categoryForFood, hasKnownFoodMatch, lookupNutrition } from "@/lib/nutrition-db";
-import { compressImageToBase64, fileToDataUrl } from "@/lib/image";
+import { compressImageToBase64 } from "@/lib/image";
 import { addMeal, deleteMeal, isToday, isYesterday, loadMeals } from "@/lib/storage";
 import { DetectedFood, GeminiFoodItem, GeminiFoodResponse, MealLog, NutritionInfo } from "@/lib/types";
 
@@ -29,6 +29,8 @@ export default function AppClient() {
   const [scanWarning, setScanWarning] = useState<string>("");
   const [analysisSource, setAnalysisSource] = useState<string>("");
   const [analysisModel, setAnalysisModel] = useState<string>("");
+  const [saveError, setSaveError] = useState<string>("");
+  const [isSaving, setIsSaving] = useState(false);
 
   const [detailMeal, setDetailMeal] = useState<MealLog | null>(null);
 
@@ -54,6 +56,8 @@ export default function AppClient() {
     setScanWarning("");
     setAnalysisSource("");
     setAnalysisModel("");
+    setSaveError("");
+    setIsSaving(false);
   }
 
   function closeScan() {
@@ -63,6 +67,8 @@ export default function AppClient() {
     setScanWarning("");
     setAnalysisSource("");
     setAnalysisModel("");
+    setSaveError("");
+    setIsSaving(false);
   }
 
   async function onImagePicked(event: ChangeEvent<HTMLInputElement>) {
@@ -72,19 +78,20 @@ export default function AppClient() {
 
     setScanError("");
     setScanWarning("");
+    setSaveError("");
     setScanPhase("analyzing");
 
     try {
-      const previewDataUrl = await fileToDataUrl(file);
-      setSelectedImageDataUrl(previewDataUrl);
-
       const base64 = await compressImageToBase64(file, 1280, 1_500_000);
+      const mimeType = file.type?.startsWith("image/") ? file.type : "image/jpeg";
+      setSelectedImageDataUrl(`data:${mimeType};base64,${base64}`);
+
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           imageBase64: base64,
-          mimeType: file.type || "image/jpeg"
+          mimeType
         })
       });
 
@@ -108,7 +115,7 @@ export default function AppClient() {
       if (payload.warning) setScanWarning(payload.warning);
       setAnalysisSource(payload.source || "gemini");
       setAnalysisModel(payload.model || "");
-      setMealName("Comida Sainz");
+      setMealName(foods.length === 1 ? foods[0].name : "Comida Sainz");
       setScanPhase("result");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
@@ -143,26 +150,36 @@ export default function AppClient() {
   }
 
   function saveCurrentMeal() {
-    if (detectedFoods.length === 0) return;
+    if (detectedFoods.length === 0 || isSaving) return;
+    setIsSaving(true);
+    setSaveError("");
 
-    const totals = sumNutrition(detectedFoods.map((food) => food.nutrition));
-    const meal: MealLog = {
-      id: generateId(),
-      date: new Date().toISOString(),
-      imageDataUrl: selectedImageDataUrl || undefined,
-      foods: detectedFoods,
-      totalCalories: totals.calories,
-      totalProtein: totals.protein,
-      totalCarbs: totals.carbs,
-      totalFat: totals.fat,
-      totalFiber: totals.fiber,
-      mealName: mealName.trim() || "Comida"
-    };
+    try {
+      const totals = sumNutrition(detectedFoods.map((food) => food.nutrition));
+      const meal: MealLog = {
+        id: generateId(),
+        date: new Date().toISOString(),
+        imageDataUrl: selectedImageDataUrl || undefined,
+        foods: detectedFoods,
+        totalCalories: totals.calories,
+        totalProtein: totals.protein,
+        totalCarbs: totals.carbs,
+        totalFat: totals.fat,
+        totalFiber: totals.fiber,
+        mealName: mealName.trim() || "Comida"
+      };
 
-    const updated = addMeal(meal);
-    setMeals(updated);
-    setTab("home");
-    closeScan();
+      const updated = addMeal(meal);
+      setMeals(updated);
+      setTab("home");
+      closeScan();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo guardar la comida.";
+      setSaveError(message);
+      setScanPhase("result");
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function removeMealFromHistory(id: string) {
@@ -228,6 +245,8 @@ export default function AppClient() {
           mealName={mealName}
           warning={scanWarning}
           error={scanError}
+          saveError={saveError}
+          isSaving={isSaving}
           source={analysisSource}
           model={analysisModel}
           cameraInputRef={cameraInputRef}
@@ -243,6 +262,7 @@ export default function AppClient() {
             setDetectedFoods([]);
             setScanWarning("");
             setScanError("");
+            setSaveError("");
             setAnalysisSource("");
             setAnalysisModel("");
           }}
@@ -437,6 +457,8 @@ function ScanModal({
   mealName,
   warning,
   error,
+  saveError,
+  isSaving,
   source,
   model,
   cameraInputRef,
@@ -455,6 +477,8 @@ function ScanModal({
   mealName: string;
   warning: string;
   error: string;
+  saveError: string;
+  isSaving: boolean;
   source: string;
   model: string;
   cameraInputRef: React.RefObject<HTMLInputElement | null>;
@@ -468,6 +492,8 @@ function ScanModal({
   onRetake: () => void;
 }) {
   const totals = sumNutrition(foods.map((food) => food.nutrition));
+  const avgConfidence = foods.length ? foods.reduce((acc, food) => acc + food.confidence, 0) / foods.length : 0;
+  const calidadIA = avgConfidence >= 0.85 ? "Alta" : avgConfidence >= 0.65 ? "Media" : "Baja";
 
   return (
     <div className="overlay">
@@ -561,6 +587,9 @@ function ScanModal({
                   {model ? ` (${model})` : ""}
                 </div>
               ) : null}
+              {foods.length > 0 ? (
+                <div className="quality-chip">Calidad IA: {calidadIA} ({Math.round(avgConfidence * 100)}%)</div>
+              ) : null}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem", textAlign: "center" }}>
                 <div>
                   <div className="kcal">{Math.round(totals.calories)}</div>
@@ -620,10 +649,18 @@ function ScanModal({
               <button type="button" className="btn secondary" onClick={onRetake}>
                 Repetir
               </button>
-              <button type="button" className="btn primary" onClick={onSave}>
-                Guardar comida
+              <button type="button" className="btn primary" onClick={onSave} disabled={isSaving}>
+                {isSaving ? "Guardando..." : "Guardar comida"}
               </button>
             </div>
+            {saveError ? (
+              <section className="card" style={{ marginTop: "0.8rem", borderColor: "rgba(255,110,110,0.45)" }}>
+                <strong style={{ color: "#ff8f8f" }}>Error al guardar</strong>
+                <p className="muted" style={{ marginBottom: 0 }}>
+                  {saveError}
+                </p>
+              </section>
+            ) : null}
           </>
         )}
       </div>

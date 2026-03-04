@@ -23,13 +23,32 @@ export function saveMeals(meals: MealLog[]): void {
 export function addMeal(meal: MealLog): MealLog[] {
   const current = loadMeals();
   const next = [meal, ...current];
-  saveMeals(next);
-  return next;
+
+  if (trySaveMeals(next)) {
+    return next;
+  }
+
+  // If storage quota is exceeded, progressively drop images from older meals.
+  const withoutOldImages = next.map((m, idx) => (idx === 0 ? m : { ...m, imageDataUrl: undefined }));
+  if (trySaveMeals(withoutOldImages)) {
+    return withoutOldImages;
+  }
+
+  // Last fallback: keep newest meals only.
+  const trimmed = [...withoutOldImages];
+  while (trimmed.length > 1) {
+    trimmed.pop();
+    if (trySaveMeals(trimmed)) {
+      return trimmed;
+    }
+  }
+
+  throw new Error("No se pudo guardar. El almacenamiento del navegador esta lleno.");
 }
 
 export function deleteMeal(id: string): MealLog[] {
   const next = loadMeals().filter((m) => m.id !== id);
-  saveMeals(next);
+  trySaveMeals(next);
   return next;
 }
 
@@ -52,4 +71,14 @@ export function isYesterday(isoDate: string): boolean {
     d.getMonth() === yesterday.getMonth() &&
     d.getDate() === yesterday.getDate()
   );
+}
+
+function trySaveMeals(meals: MealLog[]): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.setItem(MEALS_KEY, JSON.stringify(meals));
+    return true;
+  } catch {
+    return false;
+  }
 }
