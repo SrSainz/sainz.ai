@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SainzCal AI",
-  description: "Food scanner and calorie tracker powered by Gemini"
+  title: "Sainz.ai NutriVision",
+  description: "Escaner nutricional inteligente de Sainz.ai con Gemini"
 };
 
 export default function RootLayout({

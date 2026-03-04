@@ -24,9 +24,11 @@ export default function AppClient() {
   const [scanPhase, setScanPhase] = useState<ScanPhase>("picker");
   const [selectedImageDataUrl, setSelectedImageDataUrl] = useState<string>("");
   const [detectedFoods, setDetectedFoods] = useState<DetectedFood[]>([]);
-  const [mealName, setMealName] = useState("Comida");
+  const [mealName, setMealName] = useState("Comida Sainz");
   const [scanError, setScanError] = useState<string>("");
   const [scanWarning, setScanWarning] = useState<string>("");
+  const [analysisSource, setAnalysisSource] = useState<string>("");
+  const [analysisModel, setAnalysisModel] = useState<string>("");
 
   const [detailMeal, setDetailMeal] = useState<MealLog | null>(null);
 
@@ -47,9 +49,11 @@ export default function AppClient() {
     setScanPhase("picker");
     setSelectedImageDataUrl("");
     setDetectedFoods([]);
-    setMealName("Comida");
+    setMealName("Comida Sainz");
     setScanError("");
     setScanWarning("");
+    setAnalysisSource("");
+    setAnalysisModel("");
   }
 
   function closeScan() {
@@ -57,6 +61,8 @@ export default function AppClient() {
     setScanPhase("picker");
     setScanError("");
     setScanWarning("");
+    setAnalysisSource("");
+    setAnalysisModel("");
   }
 
   async function onImagePicked(event: ChangeEvent<HTMLInputElement>) {
@@ -87,7 +93,11 @@ export default function AppClient() {
         throw new Error(errorPayload?.error || "Error al analizar la imagen.");
       }
 
-      const payload = (await response.json()) as GeminiFoodResponse & { warning?: string };
+      const payload = (await response.json()) as GeminiFoodResponse & {
+        warning?: string;
+        source?: string;
+        model?: string;
+      };
       const foods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
 
       if (foods.length === 0) {
@@ -96,7 +106,9 @@ export default function AppClient() {
 
       setDetectedFoods(foods);
       if (payload.warning) setScanWarning(payload.warning);
-      setMealName("Comida");
+      setAnalysisSource(payload.source || "gemini");
+      setAnalysisModel(payload.model || "");
+      setMealName("Comida Sainz");
       setScanPhase("result");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
@@ -216,6 +228,8 @@ export default function AppClient() {
           mealName={mealName}
           warning={scanWarning}
           error={scanError}
+          source={analysisSource}
+          model={analysisModel}
           cameraInputRef={cameraInputRef}
           galleryInputRef={galleryInputRef}
           onClose={closeScan}
@@ -229,6 +243,8 @@ export default function AppClient() {
             setDetectedFoods([]);
             setScanWarning("");
             setScanError("");
+            setAnalysisSource("");
+            setAnalysisModel("");
           }}
         />
       )}
@@ -256,6 +272,7 @@ function HomeScreen({
     <>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
         <div>
+          <div className="brand-chip">Sainz.ai NutriVision</div>
           <p className="muted" style={{ margin: 0, fontSize: "1.95rem", fontWeight: 800 }}>
             {greeting}
           </p>
@@ -271,7 +288,7 @@ function HomeScreen({
             placeItems: "center"
           }}
         >
-          🌿
+          {"\u{1F33F}"}
         </div>
       </header>
 
@@ -420,6 +437,8 @@ function ScanModal({
   mealName,
   warning,
   error,
+  source,
+  model,
   cameraInputRef,
   galleryInputRef,
   onClose,
@@ -436,6 +455,8 @@ function ScanModal({
   mealName: string;
   warning: string;
   error: string;
+  source: string;
+  model: string;
   cameraInputRef: React.RefObject<HTMLInputElement | null>;
   galleryInputRef: React.RefObject<HTMLInputElement | null>;
   onClose: () => void;
@@ -451,6 +472,7 @@ function ScanModal({
   return (
     <div className="overlay">
       <div className="modal">
+        <div className="brand-mark">Sainz.ai</div>
         <div className="section-head">
           <strong>{phase === "result" ? "Resultado del escaneo" : "Escanear comida"}</strong>
           <button type="button" className="btn secondary" onClick={onClose}>
@@ -533,6 +555,12 @@ function ScanModal({
                 <strong>Nutricion total</strong>
                 <span className="muted">{foods.length} elementos</span>
               </div>
+              {source ? (
+                <div className="ia-chip">
+                  IA: {source === "gemini" ? "Gemini" : source}
+                  {model ? ` (${model})` : ""}
+                </div>
+              ) : null}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem", textAlign: "center" }}>
                 <div>
                   <div className="kcal">{Math.round(totals.calories)}</div>
@@ -779,7 +807,7 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
   const protein = clamp(food.protein, 0, 500);
   const carbs = clamp(food.carbs, 0, 500);
   const fat = clamp(food.fat, 0, 500);
-  const confidence = clamp(food.confidence, 0, 100) / 100;
+  const confidence = Math.min(clamp(food.confidence, 0, 100), 97) / 100;
   const category = categoryForFood(name);
   const safeGrams = grams > 0 ? grams : 100;
 

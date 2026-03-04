@@ -11,7 +11,7 @@ type GeminiGenerateResponse = {
   error?: { message?: string };
 };
 
-const prompt = `Analiza esta imagen de comida.
+const primaryPrompt = `Analiza esta imagen de comida.
 
 Identifica todos los alimentos visibles.
 
@@ -31,6 +31,29 @@ Reglas importantes:
 - No inventes alimentos que no se ven.
 - Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.`;
 
+const retryPrompt = `Responde de nuevo con JSON ESTRICTO.
+
+Debes devolver SOLO este objeto JSON, sin texto extra:
+{
+  "foods": [
+    {
+      "name": "string",
+      "grams": 0,
+      "calories": 0,
+      "protein": 0,
+      "carbs": 0,
+      "fat": 0,
+      "confidence": 0
+    }
+  ],
+  "total_calories": 0,
+  "total_protein": 0,
+  "total_carbs": 0,
+  "total_fat": 0
+}
+
+Usa nombres de alimentos en espanol y porciones realistas.`;
+
 export async function POST(req: NextRequest) {
   try {
     const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -49,10 +72,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing imageBase64" }, { status: 400 });
     }
 
-    let lastError = "Invalid model response.";
-    const maxRetries = 2;
+    let lastError = "Respuesta invalida del modelo.";
+    const maxRetries = 1;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      const parsed = await callGemini({ apiKey, imageBase64, mimeType });
+      const prompt = attempt === 0 ? primaryPrompt : retryPrompt;
+      const parsed = await callGemini({ apiKey, imageBase64, mimeType, prompt });
       if (!parsed.ok) {
         lastError = parsed.error;
         if (shouldRetry(parsed.error) && attempt < maxRetries) continue;
@@ -61,9 +85,9 @@ export async function POST(req: NextRequest) {
 
       const normalized = normalizeGeminiResponse(parsed.data);
       if (normalized.foods.length > 0) {
-        return NextResponse.json({ ...normalized, source: "gemini" });
+        return NextResponse.json({ ...normalized, source: "gemini", model: GEMINI_MODEL });
       }
-      lastError = "No foods detected.";
+      lastError = "No se detectaron alimentos.";
     }
 
     return NextResponse.json(
@@ -80,13 +104,14 @@ async function callGemini(input: {
   apiKey: string;
   imageBase64: string;
   mimeType: string;
+  prompt: string;
 }): Promise<{ ok: true; data: GeminiFoodResponse } | { ok: false; error: string }> {
   const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${input.apiKey}`;
   const payload = {
     contents: [
       {
         parts: [
-          { text: prompt },
+          { text: input.prompt },
           {
             inline_data: {
               mime_type: input.mimeType,
@@ -143,7 +168,7 @@ function parseFoodJson(raw: string): GeminiFoodResponse | null {
 function normalizeGeminiResponse(input: GeminiFoodResponse): GeminiFoodResponse {
   const foods = (input.foods ?? [])
     .map((food) => ({
-      name: String(food.name ?? "").trim(),
+      name: cleanFoodName(String(food.name ?? "")),
       grams: clampNumber(food.grams, 0, 2000),
       calories: clampNumber(food.calories, 0, 5000),
       protein: clampNumber(food.protein, 0, 500),
@@ -205,12 +230,22 @@ function fallbackNumber(value: unknown, fallback: number): number {
   return n;
 }
 
+function cleanFoodName(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/^[-*.\d)\s]+/, "")
+    .replace(/\s+/g, " ");
+  return cleaned.slice(0, 80);
+}
+
 function shouldRetry(message: string): boolean {
   const check = message.toLowerCase();
   return (
     check.includes("no json") ||
     check.includes("no devolvio contenido") ||
     check.includes("invalido") ||
-    check.includes("invalid")
+    check.includes("invalid") ||
+    check.includes("429") ||
+    check.includes("unavailable")
   );
 }

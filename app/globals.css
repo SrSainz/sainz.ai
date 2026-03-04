@@ -42,6 +42,38 @@ input {
   line-height: 1.05;
 }
 
+.brand-chip {
+  display: inline-block;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #101010;
+  font-weight: 800;
+  background: linear-gradient(90deg, var(--neon) 0%, #cfff9a 100%);
+  border-radius: 999px;
+  padding: 0.27rem 0.58rem;
+  margin-bottom: 0.48rem;
+}
+
+.brand-mark {
+  font-size: 0.84rem;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+}
+
+.ia-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.74rem;
+  color: #d9ffc2;
+  border: 1px solid rgba(166, 239, 89, 0.35);
+  background: rgba(166, 239, 89, 0.1);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  margin-bottom: 0.65rem;
+}
+
 .muted {
   color: var(--muted);
 }
