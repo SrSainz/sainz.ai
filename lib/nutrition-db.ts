@@ -39,7 +39,11 @@ const foods: Record<string, FoodNutrition> = {
   avocado: { name: "Avocado", caloriesPer100g: 160, proteinPer100g: 2, carbsPer100g: 9, fatPer100g: 15, fiberPer100g: 7, category: "fat" },
   apple: { name: "Apple", caloriesPer100g: 52, proteinPer100g: 0.3, carbsPer100g: 14, fatPer100g: 0.2, fiberPer100g: 2.4, category: "fruit" },
   banana: { name: "Banana", caloriesPer100g: 89, proteinPer100g: 1.1, carbsPer100g: 23, fatPer100g: 0.3, fiberPer100g: 2.6, category: "fruit" },
+  platano: { name: "Platano", caloriesPer100g: 89, proteinPer100g: 1.1, carbsPer100g: 23, fatPer100g: 0.3, fiberPer100g: 2.6, category: "fruit" },
+  "banana madura": { name: "Banana", caloriesPer100g: 89, proteinPer100g: 1.1, carbsPer100g: 23, fatPer100g: 0.3, fiberPer100g: 2.6, category: "fruit" },
+  manzana: { name: "Manzana", caloriesPer100g: 52, proteinPer100g: 0.3, carbsPer100g: 14, fatPer100g: 0.2, fiberPer100g: 2.4, category: "fruit" },
   orange: { name: "Orange", caloriesPer100g: 47, proteinPer100g: 0.9, carbsPer100g: 12, fatPer100g: 0.1, fiberPer100g: 2.4, category: "fruit" },
+  naranja: { name: "Naranja", caloriesPer100g: 47, proteinPer100g: 0.9, carbsPer100g: 12, fatPer100g: 0.1, fiberPer100g: 2.4, category: "fruit" },
   strawberry: { name: "Strawberry", caloriesPer100g: 32, proteinPer100g: 0.7, carbsPer100g: 7.7, fatPer100g: 0.3, fiberPer100g: 2, category: "fruit" },
   blueberry: { name: "Blueberry", caloriesPer100g: 57, proteinPer100g: 0.7, carbsPer100g: 14, fatPer100g: 0.3, fiberPer100g: 2.4, category: "fruit" },
   milk: { name: "Milk", caloriesPer100g: 61, proteinPer100g: 3.2, carbsPer100g: 4.8, fatPer100g: 3.3, fiberPer100g: 0, category: "dairy" },
@@ -59,6 +63,14 @@ const foods: Record<string, FoodNutrition> = {
   beans: { name: "Beans", caloriesPer100g: 127, proteinPer100g: 8.7, carbsPer100g: 23, fatPer100g: 0.5, fiberPer100g: 6.4, category: "protein" },
   lentils: { name: "Lentils", caloriesPer100g: 116, proteinPer100g: 9, carbsPer100g: 20, fatPer100g: 0.4, fiberPer100g: 7.9, category: "protein" },
   coffee: { name: "Coffee", caloriesPer100g: 2, proteinPer100g: 0.3, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  cafe: { name: "Cafe", caloriesPer100g: 2, proteinPer100g: 0.3, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  agua: { name: "Agua", caloriesPer100g: 0, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  arroz: { name: "Arroz", caloriesPer100g: 130, proteinPer100g: 2.7, carbsPer100g: 28, fatPer100g: 0.3, fiberPer100g: 0.4, category: "carb" },
+  "pechuga de pollo": { name: "Pechuga de pollo", caloriesPer100g: 165, proteinPer100g: 31, carbsPer100g: 0, fatPer100g: 3.6, fiberPer100g: 0, category: "protein" },
+  brocoli: { name: "Brocoli", caloriesPer100g: 34, proteinPer100g: 2.8, carbsPer100g: 6.6, fatPer100g: 0.4, fiberPer100g: 2.6, category: "vegetable" },
+  tomate: { name: "Tomate", caloriesPer100g: 18, proteinPer100g: 0.9, carbsPer100g: 3.9, fatPer100g: 0.2, fiberPer100g: 1.2, category: "vegetable" },
+  lechuga: { name: "Lechuga", caloriesPer100g: 15, proteinPer100g: 1.4, carbsPer100g: 2.9, fatPer100g: 0.2, fiberPer100g: 1.3, category: "vegetable" },
+  zanahoria: { name: "Zanahoria", caloriesPer100g: 41, proteinPer100g: 0.9, carbsPer100g: 10, fatPer100g: 0.2, fiberPer100g: 2.8, category: "vegetable" },
   cola: { name: "Cola", caloriesPer100g: 41, proteinPer100g: 0, carbsPer100g: 11, fatPer100g: 0, fiberPer100g: 0, category: "beverage" }
 };
 
@@ -95,6 +107,12 @@ export function categoryForFood(name: string): FoodCategory {
   return "other";
 }
 
+export function hasKnownFoodMatch(name: string): boolean {
+  const key = normalize(name);
+  if (foods[key]) return true;
+  return Object.keys(foods).some((foodKey) => key.includes(foodKey) || foodKey.includes(key));
+}
+
 export function categoryEmoji(category: FoodCategory): string {
   switch (category) {
     case "protein":
@@ -117,7 +135,12 @@ export function categoryEmoji(category: FoodCategory): string {
 }
 
 function normalize(text: string): string {
-  return text.toLowerCase().trim().replace(/-/g, " ");
+  return text
+    .toLowerCase()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/-/g, " ");
 }
 
 function scaleNutrition(food: FoodNutrition, grams: number): NutritionInfo {

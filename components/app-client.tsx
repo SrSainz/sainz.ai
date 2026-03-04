@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
-import { categoryEmoji, categoryForFood, lookupNutrition } from "@/lib/nutrition-db";
+import { categoryEmoji, categoryForFood, hasKnownFoodMatch, lookupNutrition } from "@/lib/nutrition-db";
 import { compressImageToBase64, fileToDataUrl } from "@/lib/image";
 import { addMeal, deleteMeal, isToday, isYesterday, loadMeals } from "@/lib/storage";
 import { DetectedFood, GeminiFoodItem, GeminiFoodResponse, MealLog, NutritionInfo } from "@/lib/types";
@@ -24,7 +24,7 @@ export default function AppClient() {
   const [scanPhase, setScanPhase] = useState<ScanPhase>("picker");
   const [selectedImageDataUrl, setSelectedImageDataUrl] = useState<string>("");
   const [detectedFoods, setDetectedFoods] = useState<DetectedFood[]>([]);
-  const [mealName, setMealName] = useState("Meal");
+  const [mealName, setMealName] = useState("Comida");
   const [scanError, setScanError] = useState<string>("");
   const [scanWarning, setScanWarning] = useState<string>("");
 
@@ -47,7 +47,7 @@ export default function AppClient() {
     setScanPhase("picker");
     setSelectedImageDataUrl("");
     setDetectedFoods([]);
-    setMealName("Meal");
+    setMealName("Comida");
     setScanError("");
     setScanWarning("");
   }
@@ -84,22 +84,22 @@ export default function AppClient() {
 
       if (!response.ok) {
         const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(errorPayload?.error || "Failed to analyze image.");
+        throw new Error(errorPayload?.error || "Error al analizar la imagen.");
       }
 
       const payload = (await response.json()) as GeminiFoodResponse & { warning?: string };
       const foods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
 
       if (foods.length === 0) {
-        throw new Error("No foods detected. Try a clearer photo.");
+        throw new Error("No se detectaron alimentos. Prueba con una foto mas clara.");
       }
 
       setDetectedFoods(foods);
       if (payload.warning) setScanWarning(payload.warning);
-      setMealName("Meal");
+      setMealName("Comida");
       setScanPhase("result");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unexpected error analyzing image.";
+      const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
       setScanError(message);
       setScanPhase("picker");
     }
@@ -144,7 +144,7 @@ export default function AppClient() {
       totalCarbs: totals.carbs,
       totalFat: totals.fat,
       totalFiber: totals.fiber,
-      mealName: mealName.trim() || "Meal"
+      mealName: mealName.trim() || "Comida"
     };
 
     const updated = addMeal(meal);
@@ -189,12 +189,12 @@ export default function AppClient() {
             type="button"
             onClick={() => setTab("home")}
           >
-            <span>🏠</span>
-            <span className="tiny">Home</span>
+            <span>{"\u{1F3E0}"}</span>
+            <span className="tiny">Inicio</span>
           </button>
 
-          <button className="scan-main-btn" type="button" onClick={openScan} aria-label="Scan food">
-            📷
+          <button className="scan-main-btn" type="button" onClick={openScan} aria-label="Escanear comida">
+            {"\u{1F4F7}"}
           </button>
 
           <button
@@ -202,8 +202,8 @@ export default function AppClient() {
             type="button"
             onClick={() => setTab("history")}
           >
-            <span>📊</span>
-            <span className="tiny">History</span>
+            <span>{"\u{1F4CA}"}</span>
+            <span className="tiny">Historial</span>
           </button>
         </div>
       </nav>
@@ -259,7 +259,7 @@ function HomeScreen({
           <p className="muted" style={{ margin: 0, fontSize: "1.95rem", fontWeight: 800 }}>
             {greeting}
           </p>
-          <h1 className="screen-title">Today&apos;s Nutrition</h1>
+          <h1 className="screen-title">Nutricion de hoy</h1>
         </div>
         <div
           style={{
@@ -282,37 +282,37 @@ function HomeScreen({
               <div>
                 <div style={{ fontSize: "2.7rem", fontWeight: 800, lineHeight: 1 }}>{Math.round(todayNutrition.calories)}</div>
                 <div className="muted">kcal</div>
-                <div style={{ color: "var(--neon)", fontSize: "0.8rem", fontWeight: 700 }}>{Math.round(remaining)} left</div>
+                <div style={{ color: "var(--neon)", fontSize: "0.8rem", fontWeight: 700 }}>{Math.round(remaining)} restantes</div>
               </div>
             </div>
           </div>
         </div>
 
         <div className="macro-pills">
-          <MacroPill label="Protein" value={todayNutrition.protein} color="var(--protein)" />
-          <MacroPill label="Carbs" value={todayNutrition.carbs} color="var(--carbs)" />
-          <MacroPill label="Fat" value={todayNutrition.fat} color="var(--fat)" />
+          <MacroPill label="Proteina" value={todayNutrition.protein} color="var(--protein)" />
+          <MacroPill label="Carbohidratos" value={todayNutrition.carbs} color="var(--carbs)" />
+          <MacroPill label="Grasa" value={todayNutrition.fat} color="var(--fat)" />
         </div>
       </section>
 
       <section className="card" style={{ marginTop: "1rem" }}>
         <div className="section-head">
-          <h2 style={{ margin: 0 }}>Macro Breakdown</h2>
-          <span className="muted">{todayMeals.length} meals</span>
+          <h2 style={{ margin: 0 }}>Resumen de macros</h2>
+          <span className="muted">{todayMeals.length} comidas</span>
         </div>
-        <MacroRow label="Protein" value={todayNutrition.protein} goal={GOALS.protein} color="var(--protein)" />
-        <MacroRow label="Carbohydrates" value={todayNutrition.carbs} goal={GOALS.carbs} color="var(--carbs)" />
-        <MacroRow label="Fat" value={todayNutrition.fat} goal={GOALS.fat} color="var(--fat)" />
+        <MacroRow label="Proteina" value={todayNutrition.protein} goal={GOALS.protein} color="var(--protein)" />
+        <MacroRow label="Carbohidratos" value={todayNutrition.carbs} goal={GOALS.carbs} color="var(--carbs)" />
+        <MacroRow label="Grasa" value={todayNutrition.fat} goal={GOALS.fat} color="var(--fat)" />
       </section>
 
       <section className="card" style={{ marginTop: "1rem" }}>
         <div className="section-head">
-          <h2 style={{ margin: 0 }}>Today&apos;s Meals</h2>
+          <h2 style={{ margin: 0 }}>Comidas de hoy</h2>
           <span className="muted">{todayMeals.length}</span>
         </div>
         {todayMeals.length === 0 ? (
           <p className="muted" style={{ margin: 0 }}>
-            No meals logged today.
+            No hay comidas registradas hoy.
           </p>
         ) : (
           todayMeals.map((meal) => (
@@ -348,13 +348,13 @@ function HistoryScreen({
   return (
     <>
       <header style={{ marginBottom: "1rem" }}>
-        <h1 className="screen-title">History</h1>
+        <h1 className="screen-title">Historial</h1>
       </header>
 
       {groups.length === 0 ? (
         <section className="card">
           <p className="muted" style={{ margin: 0 }}>
-            No history yet. Save your first scan.
+            No hay historial todavia. Guarda tu primer escaneo.
           </p>
         </section>
       ) : (
@@ -400,7 +400,7 @@ function HistoryScreen({
                         cursor: "pointer"
                       }}
                     >
-                      Delete
+                      Eliminar
                     </button>
                   </div>
                 </div>
@@ -452,32 +452,32 @@ function ScanModal({
     <div className="overlay">
       <div className="modal">
         <div className="section-head">
-          <strong>{phase === "result" ? "Scan Result" : "Scan Food"}</strong>
+          <strong>{phase === "result" ? "Resultado del escaneo" : "Escanear comida"}</strong>
           <button type="button" className="btn secondary" onClick={onClose}>
-            Close
+            Cerrar
           </button>
         </div>
 
         {phase === "picker" && (
           <>
             <section className="card" style={{ marginBottom: "0.8rem" }}>
-              <p style={{ marginTop: 0, fontWeight: 700, fontSize: "1.1rem" }}>Snap your meal</p>
+              <p style={{ marginTop: 0, fontWeight: 700, fontSize: "1.1rem" }}>Haz una foto de tu comida</p>
               <p className="muted">
-                Take a photo or choose from your library. Gemini 1.5 Flash will estimate grams, calories and macros.
+                Toma una foto o elige una imagen de tu galeria. Gemini estimara gramos, calorias y macros.
               </p>
               <div className="scan-actions">
                 <button type="button" className="btn primary" onClick={() => cameraInputRef.current?.click()}>
-                  Take Photo
+                  Tomar foto
                 </button>
                 <button type="button" className="btn secondary" onClick={() => galleryInputRef.current?.click()}>
-                  Choose from Library
+                  Elegir de galeria
                 </button>
               </div>
             </section>
 
             {error ? (
               <section className="card" style={{ borderColor: "rgba(255,110,110,0.45)" }}>
-                <strong style={{ color: "#ff8f8f" }}>Could not detect food</strong>
+                <strong style={{ color: "#ff8f8f" }}>No se pudo detectar comida</strong>
                 <p className="muted" style={{ marginBottom: 0 }}>
                   {error}
                 </p>
@@ -505,23 +505,23 @@ function ScanModal({
         {phase === "analyzing" && (
           <section className="card analyzing">
             <div className="pulse" />
-            <h3 style={{ marginTop: 0 }}>Analyzing your meal...</h3>
+            <h3 style={{ marginTop: 0 }}>Analizando tu comida...</h3>
             <p className="muted" style={{ marginBottom: 0 }}>
-              AI is identifying food items and calculating nutrition.
+              La IA esta identificando alimentos y calculando nutricion.
             </p>
             {imageDataUrl ? (
-              <img src={imageDataUrl} alt="Selected meal" className="result-image" style={{ marginTop: "1rem", height: 130 }} />
+              <img src={imageDataUrl} alt="Comida seleccionada" className="result-image" style={{ marginTop: "1rem", height: 130 }} />
             ) : null}
           </section>
         )}
 
         {phase === "result" && (
           <>
-            {imageDataUrl ? <img src={imageDataUrl} alt="Scan result" className="result-image" /> : null}
+            {imageDataUrl ? <img src={imageDataUrl} alt="Resultado del escaneo" className="result-image" /> : null}
 
             {warning ? (
               <section className="card" style={{ marginTop: "0.8rem", borderColor: "rgba(255,196,71,0.55)" }}>
-                <strong style={{ color: "var(--carbs)" }}>Analysis note</strong>
+                <strong style={{ color: "var(--carbs)" }}>Nota del analisis</strong>
                 <p className="muted" style={{ marginBottom: 0 }}>
                   {warning}
                 </p>
@@ -530,32 +530,32 @@ function ScanModal({
 
             <section className="card" style={{ marginTop: "0.8rem" }}>
               <div className="section-head">
-                <strong>Total Nutrition</strong>
-                <span className="muted">{foods.length} items</span>
+                <strong>Nutricion total</strong>
+                <span className="muted">{foods.length} elementos</span>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem", textAlign: "center" }}>
                 <div>
                   <div className="kcal">{Math.round(totals.calories)}</div>
-                  <div className="tiny muted">Calories</div>
+                  <div className="tiny muted">Calorias</div>
                 </div>
                 <div>
                   <div>{Math.round(totals.protein)}g</div>
-                  <div className="tiny muted">Protein</div>
+                  <div className="tiny muted">Proteina</div>
                 </div>
                 <div>
                   <div>{Math.round(totals.carbs)}g</div>
-                  <div className="tiny muted">Carbs</div>
+                  <div className="tiny muted">Carbohidratos</div>
                 </div>
                 <div>
                   <div>{Math.round(totals.fat)}g</div>
-                  <div className="tiny muted">Fat</div>
+                  <div className="tiny muted">Grasa</div>
                 </div>
               </div>
             </section>
 
             <section className="card" style={{ marginTop: "0.8rem" }}>
               <label htmlFor="meal-name" className="tiny muted">
-                Meal Name
+                Nombre de la comida
               </label>
               <input
                 id="meal-name"
@@ -575,8 +575,8 @@ function ScanModal({
 
             <section className="card" style={{ marginTop: "0.8rem" }}>
               <div className="section-head">
-                <strong>Detected Foods</strong>
-                <span className="muted tiny">Tap grams to edit</span>
+                <strong>Alimentos detectados</strong>
+                <span className="muted tiny">Edita gramos</span>
               </div>
               {foods.map((food) => (
                 <FoodResultRow
@@ -590,10 +590,10 @@ function ScanModal({
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.8rem" }}>
               <button type="button" className="btn secondary" onClick={onRetake}>
-                Retake
+                Repetir
               </button>
               <button type="button" className="btn primary" onClick={onSave}>
-                Save Meal
+                Guardar comida
               </button>
             </div>
           </>
@@ -610,7 +610,7 @@ function MealDetailModal({ meal, onClose }: { meal: MealLog; onClose: () => void
         <div className="section-head">
           <strong>{meal.mealName}</strong>
           <button type="button" className="btn secondary" onClick={onClose}>
-            Done
+            Listo
           </button>
         </div>
 
@@ -620,26 +620,26 @@ function MealDetailModal({ meal, onClose }: { meal: MealLog; onClose: () => void
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", textAlign: "center", gap: "0.4rem" }}>
             <div>
               <div className="kcal">{Math.round(meal.totalCalories)}</div>
-              <div className="tiny muted">Calories</div>
+              <div className="tiny muted">Calorias</div>
             </div>
             <div>
               <div>{Math.round(meal.totalProtein)}g</div>
-              <div className="tiny muted">Protein</div>
+              <div className="tiny muted">Proteina</div>
             </div>
             <div>
               <div>{Math.round(meal.totalCarbs)}g</div>
-              <div className="tiny muted">Carbs</div>
+              <div className="tiny muted">Carbohidratos</div>
             </div>
             <div>
               <div>{Math.round(meal.totalFat)}g</div>
-              <div className="tiny muted">Fat</div>
+              <div className="tiny muted">Grasa</div>
             </div>
           </div>
         </section>
 
         <section className="card" style={{ marginTop: "0.8rem" }}>
           <div className="section-head">
-            <strong>Food Items</strong>
+            <strong>Alimentos</strong>
             <span className="muted">{formatTime(meal.date)}</span>
           </div>
           {meal.foods.map((food) => (
@@ -702,7 +702,7 @@ function FoodResultRow({
             textAlign: "right"
           }}
         />
-        <div className="tiny muted">grams</div>
+        <div className="tiny muted">gramos</div>
         <span
           className="badge"
           style={{
@@ -725,7 +725,7 @@ function FoodResultRow({
               marginTop: "0.2rem"
             }}
           >
-            Remove
+            Quitar
           </button>
         </div>
       </div>
@@ -781,6 +781,7 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
   const fat = clamp(food.fat, 0, 500);
   const confidence = clamp(food.confidence, 0, 100) / 100;
   const category = categoryForFood(name);
+  const safeGrams = grams > 0 ? grams : 100;
 
   const aiNutrition: NutritionInfo = {
     calories,
@@ -790,17 +791,52 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
     fiber: 0
   };
 
-  const fallback = lookupNutrition(name, grams || 100);
-  const nutrition = calories + protein + carbs + fat > 0 ? aiNutrition : fallback;
+  const fallback = lookupNutrition(name, safeGrams);
+  const hasAiNutrition = calories + protein + carbs + fat > 0;
+  const isKnown = hasKnownFoodMatch(name);
+  const nutrition = chooseBestNutrition({
+    ai: aiNutrition,
+    fallback,
+    hasAiNutrition,
+    isKnown,
+    confidence
+  });
 
   return {
     id: generateId(),
     name,
-    estimatedGrams: grams > 0 ? grams : 100,
+    estimatedGrams: safeGrams,
     confidence,
     category,
     nutrition
   };
+}
+
+function chooseBestNutrition(input: {
+  ai: NutritionInfo;
+  fallback: NutritionInfo;
+  hasAiNutrition: boolean;
+  isKnown: boolean;
+  confidence: number;
+}): NutritionInfo {
+  if (!input.hasAiNutrition) return input.fallback;
+  if (!input.isKnown) return input.ai;
+
+  const ai = input.ai;
+  const fallback = input.fallback;
+  const aiCalories = Math.max(ai.calories, 1);
+  const fallbackCalories = Math.max(fallback.calories, 1);
+  const ratio = aiCalories / fallbackCalories;
+
+  const aiMacros = ai.protein + ai.carbs + ai.fat;
+  const fallbackMacros = fallback.protein + fallback.carbs + fallback.fat;
+  const macroRatio = Math.max(aiMacros, 1) / Math.max(fallbackMacros, 1);
+
+  const outlier = ratio > 2.2 || ratio < 0.45 || macroRatio > 2.4 || macroRatio < 0.4;
+  if (outlier && input.confidence < 0.95) {
+    return fallback;
+  }
+  return ai;
 }
 
 function sumNutrition(items: NutritionInfo[]): NutritionInfo {
@@ -831,9 +867,9 @@ function sumMealsNutrition(meals: MealLog[]): NutritionInfo {
 
 function getGreeting(): string {
   const hour = new Date().getHours();
-  if (hour < 12) return "Good morning";
-  if (hour < 17) return "Good afternoon";
-  return "Good evening";
+  if (hour < 12) return "Buenos dias";
+  if (hour < 17) return "Buenas tardes";
+  return "Buenas noches";
 }
 
 function formatTime(dateIso: string): string {
@@ -860,8 +896,8 @@ function groupByDay(meals: MealLog[]): Array<{ key: string; title: string; meals
 }
 
 function labelForDay(dateIso: string): string {
-  if (isToday(dateIso)) return "Today";
-  if (isYesterday(dateIso)) return "Yesterday";
+  if (isToday(dateIso)) return "Hoy";
+  if (isYesterday(dateIso)) return "Ayer";
   return new Date(dateIso).toLocaleDateString([], {
     weekday: "long",
     month: "short",

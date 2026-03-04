@@ -95,36 +95,7 @@ async function callGemini(input: {
           }
         ]
       }
-    ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          foods: {
-            type: "ARRAY",
-            items: {
-              type: "OBJECT",
-              properties: {
-                name: { type: "STRING" },
-                grams: { type: "NUMBER" },
-                calories: { type: "NUMBER" },
-                protein: { type: "NUMBER" },
-                carbs: { type: "NUMBER" },
-                fat: { type: "NUMBER" },
-                confidence: { type: "NUMBER" }
-              },
-              required: ["name", "grams", "calories", "protein", "carbs", "fat", "confidence"]
-            }
-          },
-          total_calories: { type: "NUMBER" },
-          total_protein: { type: "NUMBER" },
-          total_carbs: { type: "NUMBER" },
-          total_fat: { type: "NUMBER" }
-        },
-        required: ["foods", "total_calories", "total_protein", "total_carbs", "total_fat"]
-      }
-    }
+    ]
   };
 
   const response = await fetch(url, {
