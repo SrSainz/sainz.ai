@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GeminiFoodResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
+const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-2.0-flash";
 
 type GeminiGenerateResponse = {
   candidates?: Array<{
@@ -10,41 +11,25 @@ type GeminiGenerateResponse = {
   error?: { message?: string };
 };
 
-const prompt = `Analyze this food image.
+const prompt = `Analiza esta imagen de comida.
 
-Identify all visible food items.
+Identifica todos los alimentos visibles.
 
-For each food item:
-- name
-- estimated weight in grams
-- estimated calories
-- protein (g)
-- carbs (g)
-- fat (g)
-- confidence (0-100%)
+Para cada alimento devuelve:
+- name (en espanol)
+- grams
+- calories
+- protein
+- carbs
+- fat
+- confidence (0-100)
 
-Return ONLY valid JSON in this format:
-
-{
-  "foods": [
-    {
-      "name": "",
-      "grams": 0,
-      "calories": 0,
-      "protein": 0,
-      "carbs": 0,
-      "fat": 0,
-      "confidence": 0
-    }
-  ],
-  "total_calories": 0,
-  "total_protein": 0,
-  "total_carbs": 0,
-  "total_fat": 0
-}
-
-Do not add explanations.
-Be realistic with portion sizes.`;
+Reglas importantes:
+- Devuelve SOLO JSON valido.
+- Sin markdown.
+- Si aparece una unica pieza de fruta (por ejemplo un platano), usa gramos realistas de una unidad (aprox. 90-160 g comestibles).
+- No inventes alimentos que no se ven.
+- Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -76,15 +61,18 @@ export async function POST(req: NextRequest) {
 
       const normalized = normalizeGeminiResponse(parsed.data);
       if (normalized.foods.length > 0) {
-        return NextResponse.json(normalized);
+        return NextResponse.json({ ...normalized, source: "gemini" });
       }
       lastError = "No foods detected.";
     }
 
-    return NextResponse.json(safeFallback(lastError), { status: 200 });
+    return NextResponse.json(
+      { error: `Gemini no devolvio un resultado valido: ${lastError}` },
+      { status: 502 }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected server error.";
-    return NextResponse.json(safeFallback(message), { status: 200 });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -93,7 +81,7 @@ async function callGemini(input: {
   imageBase64: string;
   mimeType: string;
 }): Promise<{ ok: true; data: GeminiFoodResponse } | { ok: false; error: string }> {
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${input.apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${input.apiKey}`;
   const payload = {
     contents: [
       {
@@ -107,7 +95,36 @@ async function callGemini(input: {
           }
         ]
       }
-    ]
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          foods: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                name: { type: "STRING" },
+                grams: { type: "NUMBER" },
+                calories: { type: "NUMBER" },
+                protein: { type: "NUMBER" },
+                carbs: { type: "NUMBER" },
+                fat: { type: "NUMBER" },
+                confidence: { type: "NUMBER" }
+              },
+              required: ["name", "grams", "calories", "protein", "carbs", "fat", "confidence"]
+            }
+          },
+          total_calories: { type: "NUMBER" },
+          total_protein: { type: "NUMBER" },
+          total_carbs: { type: "NUMBER" },
+          total_fat: { type: "NUMBER" }
+        },
+        required: ["foods", "total_calories", "total_protein", "total_carbs", "total_fat"]
+      }
+    }
   };
 
   const response = await fetch(url, {
@@ -124,13 +141,13 @@ async function callGemini(input: {
   }
 
   const envelope = safeJsonParse<GeminiGenerateResponse>(rawText);
-  if (!envelope) return { ok: false, error: "Gemini returned invalid JSON envelope." };
+  if (!envelope) return { ok: false, error: "Gemini devolvio un sobre JSON invalido." };
 
   const contentText = envelope.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim();
-  if (!contentText) return { ok: false, error: "Gemini response has no text content." };
+  if (!contentText) return { ok: false, error: "Gemini no devolvio contenido de texto." };
 
   const parsed = parseFoodJson(contentText);
-  if (!parsed) return { ok: false, error: "Gemini returned non-JSON text." };
+  if (!parsed) return { ok: false, error: "Gemini devolvio texto no JSON." };
 
   return { ok: true, data: parsed };
 }
@@ -185,27 +202,6 @@ function normalizeGeminiResponse(input: GeminiFoodResponse): GeminiFoodResponse 
   };
 }
 
-function safeFallback(message: string): GeminiFoodResponse & { warning: string } {
-  return {
-    foods: [
-      {
-        name: "Estimated Meal",
-        grams: 200,
-        calories: 300,
-        protein: 20,
-        carbs: 30,
-        fat: 10,
-        confidence: 15
-      }
-    ],
-    total_calories: 300,
-    total_protein: 20,
-    total_carbs: 30,
-    total_fat: 10,
-    warning: message
-  };
-}
-
 function extractJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -241,8 +237,9 @@ function fallbackNumber(value: unknown, fallback: number): number {
 function shouldRetry(message: string): boolean {
   const check = message.toLowerCase();
   return (
-    check.includes("non-json") ||
-    check.includes("no text content") ||
-    check.includes("invalid json")
+    check.includes("no json") ||
+    check.includes("no devolvio contenido") ||
+    check.includes("invalido") ||
+    check.includes("invalid")
   );
 }
