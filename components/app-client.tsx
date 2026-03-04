@@ -6,12 +6,32 @@ import { compressImageToBase64 } from "@/lib/image";
 import { addMeal, deleteMeal, isToday, isYesterday, loadMeals } from "@/lib/storage";
 import { DetectedFood, GeminiFoodItem, GeminiFoodResponse, MealLog, NutritionInfo } from "@/lib/types";
 
-const GOALS = {
+type Goals = {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+};
+
+type HealthSex = "hombre" | "mujer";
+type ActivityLevel = "sedentario" | "ligero" | "moderado" | "alto";
+
+type HealthProfile = {
+  age: number;
+  weightKg: number;
+  heightCm: number;
+  sex: HealthSex;
+  activity: ActivityLevel;
+};
+
+const DEFAULT_GOALS: Goals = {
   calories: 2000,
   protein: 150,
   carbs: 250,
   fat: 65
 };
+const GOALS_KEY = "sainzcal_goals_v1";
+const PROFILE_KEY = "sainzcal_health_profile_v1";
 
 type Tab = "home" | "history";
 type ScanPhase = "picker" | "analyzing" | "result";
@@ -24,13 +44,17 @@ export default function AppClient() {
   const [scanPhase, setScanPhase] = useState<ScanPhase>("picker");
   const [selectedImageDataUrl, setSelectedImageDataUrl] = useState<string>("");
   const [detectedFoods, setDetectedFoods] = useState<DetectedFood[]>([]);
-  const [mealName, setMealName] = useState("Comida Sainz");
+  const [mealName, setMealName] = useState(mealPeriodLabel(new Date()));
   const [scanError, setScanError] = useState<string>("");
   const [scanWarning, setScanWarning] = useState<string>("");
   const [analysisSource, setAnalysisSource] = useState<string>("");
   const [analysisModel, setAnalysisModel] = useState<string>("");
   const [saveError, setSaveError] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
+  const [goals, setGoals] = useState<Goals>(DEFAULT_GOALS);
+  const [showGoals, setShowGoals] = useState(false);
+  const [profile, setProfile] = useState<HealthProfile | null>(null);
+  const [showHealthProfile, setShowHealthProfile] = useState(false);
 
   const [detailMeal, setDetailMeal] = useState<MealLog | null>(null);
 
@@ -39,6 +63,9 @@ export default function AppClient() {
 
   useEffect(() => {
     setMeals(loadMeals());
+    const parsed = loadGoals();
+    setGoals(parsed);
+    setProfile(loadHealthProfile());
   }, []);
 
   const todayMeals = useMemo(() => meals.filter((meal) => isToday(meal.date)), [meals]);
@@ -51,7 +78,7 @@ export default function AppClient() {
     setScanPhase("picker");
     setSelectedImageDataUrl("");
     setDetectedFoods([]);
-    setMealName("Comida Sainz");
+    setMealName(mealPeriodLabel(new Date()));
     setScanError("");
     setScanWarning("");
     setAnalysisSource("");
@@ -105,7 +132,8 @@ export default function AppClient() {
         source?: string;
         model?: string;
       };
-      const foods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
+      const rawFoods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
+      const foods = mergeSimilarFoods(rawFoods);
 
       if (foods.length === 0) {
         throw new Error("No se detectaron alimentos. Prueba con una foto mas clara.");
@@ -115,7 +143,7 @@ export default function AppClient() {
       if (payload.warning) setScanWarning(payload.warning);
       setAnalysisSource(payload.source || "gemini");
       setAnalysisModel(payload.model || "");
-      setMealName(foods.length === 1 ? foods[0].name : "Comida Sainz");
+      setMealName(buildMealNameForCurrentTime(suggestMealName(foods), new Date()));
       setScanPhase("result");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
@@ -156,6 +184,7 @@ export default function AppClient() {
 
     try {
       const totals = sumNutrition(detectedFoods.map((food) => food.nutrition));
+      const finalMealName = buildMealNameForCurrentTime(mealName, new Date());
       const meal: MealLog = {
         id: generateId(),
         date: new Date().toISOString(),
@@ -166,7 +195,7 @@ export default function AppClient() {
         totalCarbs: totals.carbs,
         totalFat: totals.fat,
         totalFiber: totals.fiber,
-        mealName: mealName.trim() || "Comida"
+        mealName: finalMealName
       };
 
       const updated = addMeal(meal);
@@ -188,7 +217,7 @@ export default function AppClient() {
     if (detailMeal?.id === id) setDetailMeal(null);
   }
 
-  const progress = Math.min(todayNutrition.calories / Math.max(GOALS.calories, 1), 1);
+  const progress = Math.min(todayNutrition.calories / Math.max(goals.calories, 1), 1);
   const progressStyle = {
     "--progress": Math.round(progress * 100)
   } as CSSProperties;
@@ -201,6 +230,10 @@ export default function AppClient() {
             todayMeals={todayMeals}
             todayNutrition={todayNutrition}
             progressStyle={progressStyle}
+            goals={goals}
+            profile={profile}
+            onOpenGoals={() => setShowGoals(true)}
+            onOpenProfile={() => setShowHealthProfile(true)}
           />
         ) : (
           <HistoryScreen
@@ -265,12 +298,37 @@ export default function AppClient() {
             setSaveError("");
             setAnalysisSource("");
             setAnalysisModel("");
+            setMealName(mealPeriodLabel(new Date()));
           }}
         />
       )}
 
       {detailMeal && (
         <MealDetailModal meal={detailMeal} onClose={() => setDetailMeal(null)} />
+      )}
+
+      {showGoals && (
+        <GoalsModal
+          goals={goals}
+          onClose={() => setShowGoals(false)}
+          onSave={(nextGoals) => {
+            setGoals(nextGoals);
+            saveGoals(nextGoals);
+            setShowGoals(false);
+          }}
+        />
+      )}
+
+      {showHealthProfile && (
+        <HealthProfileModal
+          profile={profile}
+          onClose={() => setShowHealthProfile(false)}
+          onSave={(nextProfile) => {
+            setProfile(nextProfile);
+            saveHealthProfile(nextProfile);
+            setShowHealthProfile(false);
+          }}
+        />
       )}
     </>
   );
@@ -279,21 +337,30 @@ export default function AppClient() {
 function HomeScreen({
   todayMeals,
   todayNutrition,
-  progressStyle
+  progressStyle,
+  goals,
+  profile,
+  onOpenGoals,
+  onOpenProfile
 }: {
   todayMeals: MealLog[];
   todayNutrition: NutritionInfo;
   progressStyle: CSSProperties;
+  goals: Goals;
+  profile: HealthProfile | null;
+  onOpenGoals: () => void;
+  onOpenProfile: () => void;
 }) {
   const greeting = getGreeting();
-  const remaining = Math.max(0, GOALS.calories - todayNutrition.calories);
+  const remaining = Math.max(0, goals.calories - todayNutrition.calories);
+  const health = evaluateHealthStatus(todayNutrition, goals, profile);
 
   return (
     <>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
         <div>
           <div className="brand-chip">Sainz.ai</div>
-          <p className="muted" style={{ margin: 0, fontSize: "1.95rem", fontWeight: 800 }}>
+          <p className="muted" style={{ margin: 0, fontSize: "1.08rem", fontWeight: 700 }}>
             {greeting}
           </p>
           <h1 className="screen-title">Nutricion de hoy</h1>
@@ -311,6 +378,14 @@ function HomeScreen({
           {"\u{1F33F}"}
         </div>
       </header>
+      <div style={{ marginBottom: "0.8rem", display: "flex", justifyContent: "flex-end", gap: "0.5rem", flexWrap: "wrap" }}>
+        <button type="button" className="btn secondary" onClick={onOpenProfile}>
+          Perfil salud
+        </button>
+        <button type="button" className="btn secondary" onClick={onOpenGoals}>
+          Objetivos
+        </button>
+      </div>
 
       <section className="card">
         <div className="macro-ring-wrap">
@@ -337,9 +412,53 @@ function HomeScreen({
           <h2 style={{ margin: 0 }}>Resumen de macros</h2>
           <span className="muted">{todayMeals.length} comidas</span>
         </div>
-        <MacroRow label="Proteina" value={todayNutrition.protein} goal={GOALS.protein} color="var(--protein)" />
-        <MacroRow label="Carbohidratos" value={todayNutrition.carbs} goal={GOALS.carbs} color="var(--carbs)" />
-        <MacroRow label="Grasa" value={todayNutrition.fat} goal={GOALS.fat} color="var(--fat)" />
+        <MacroRow label="Proteina" value={todayNutrition.protein} goal={goals.protein} color="var(--protein)" />
+        <MacroRow label="Carbohidratos" value={todayNutrition.carbs} goal={goals.carbs} color="var(--carbs)" />
+        <MacroRow label="Grasa" value={todayNutrition.fat} goal={goals.fat} color="var(--fat)" />
+      </section>
+
+      <section className="card" style={{ marginTop: "1rem" }}>
+        <div className="section-head">
+          <h2 style={{ margin: 0 }}>Coach Sainz.ai</h2>
+          <span className="muted tiny">Sugerencia del dia</span>
+        </div>
+        <p className="muted" style={{ margin: 0, lineHeight: 1.45 }}>
+          {buildDailyInsight(todayNutrition, goals)}
+        </p>
+      </section>
+
+      <section className="card" style={{ marginTop: "1rem" }}>
+        <div className="section-head">
+          <h2 style={{ margin: 0 }}>Salud e IMC</h2>
+          <span className={`status-chip ${health.bmi.isHealthy ? "ok" : "warn"}`}>{health.bmi.label}</span>
+        </div>
+        {profile ? (
+          <>
+            <div className="health-grid">
+              <div className="health-cell">
+                <div className="muted tiny">IMC</div>
+                <div className="health-value">{health.bmi.value.toFixed(1)}</div>
+              </div>
+              <div className="health-cell">
+                <div className="muted tiny">Metabolismo</div>
+                <div className="health-value">{Math.round(health.tdee)} kcal</div>
+              </div>
+              <div className="health-cell">
+                <div className="muted tiny">Dieta de hoy</div>
+                <div className={`health-value ${health.dietHealthy ? "text-ok" : "text-warn"}`}>
+                  {health.dietHealthy ? "Saludable" : "Mejorable"}
+                </div>
+              </div>
+            </div>
+            <p className="muted" style={{ margin: "0.7rem 0 0", lineHeight: 1.45 }}>
+              {health.message}
+            </p>
+          </>
+        ) : (
+          <p className="muted" style={{ margin: 0, lineHeight: 1.45 }}>
+            Completa tu perfil de salud (edad, peso, altura, sexo y actividad) para calcular IMC y evaluar tu dieta.
+          </p>
+        )}
       </section>
 
       <section className="card" style={{ marginTop: "1rem" }}>
@@ -726,6 +845,195 @@ function MealDetailModal({ meal, onClose }: { meal: MealLog; onClose: () => void
   );
 }
 
+function GoalsModal({
+  goals,
+  onClose,
+  onSave
+}: {
+  goals: Goals;
+  onClose: () => void;
+  onSave: (goals: Goals) => void;
+}) {
+  const [draft, setDraft] = useState<Goals>(goals);
+
+  return (
+    <div className="overlay">
+      <div className="modal">
+        <div className="brand-mark">Sainz.ai</div>
+        <div className="section-head">
+          <strong>Objetivos diarios</strong>
+          <button type="button" className="btn secondary" onClick={onClose}>
+            Cerrar
+          </button>
+        </div>
+        <section className="card">
+          <GoalInput
+            label="Calorias"
+            value={draft.calories}
+            onChange={(v) => setDraft((p) => ({ ...p, calories: v }))}
+          />
+          <GoalInput
+            label="Proteina (g)"
+            value={draft.protein}
+            onChange={(v) => setDraft((p) => ({ ...p, protein: v }))}
+          />
+          <GoalInput
+            label="Carbohidratos (g)"
+            value={draft.carbs}
+            onChange={(v) => setDraft((p) => ({ ...p, carbs: v }))}
+          />
+          <GoalInput
+            label="Grasa (g)"
+            value={draft.fat}
+            onChange={(v) => setDraft((p) => ({ ...p, fat: v }))}
+          />
+        </section>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.8rem" }}>
+          <button type="button" className="btn secondary" onClick={onClose}>
+            Cancelar
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() =>
+              onSave({
+                calories: clamp(draft.calories, 1000, 6000),
+                protein: clamp(draft.protein, 20, 500),
+                carbs: clamp(draft.carbs, 20, 700),
+                fat: clamp(draft.fat, 10, 300)
+              })
+            }
+          >
+            Guardar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GoalInput({
+  label,
+  value,
+  onChange
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label style={{ display: "grid", gap: "0.3rem", marginBottom: "0.65rem" }}>
+      <span className="tiny muted">{label}</span>
+      <input
+        type="number"
+        min={1}
+        value={Math.round(value)}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{
+          width: "100%",
+          background: "#0f0f14",
+          color: "white",
+          border: "1px solid rgba(255,255,255,0.1)",
+          borderRadius: "0.75rem",
+          padding: "0.65rem 0.8rem"
+        }}
+      />
+    </label>
+  );
+}
+
+function HealthProfileModal({
+  profile,
+  onClose,
+  onSave
+}: {
+  profile: HealthProfile | null;
+  onClose: () => void;
+  onSave: (profile: HealthProfile) => void;
+}) {
+  const initial = profile ?? defaultHealthProfile();
+  const [draft, setDraft] = useState<HealthProfile>(initial);
+
+  return (
+    <div className="overlay">
+      <div className="modal">
+        <div className="brand-mark">Sainz.ai</div>
+        <div className="section-head">
+          <strong>Perfil de salud</strong>
+          <button type="button" className="btn secondary" onClick={onClose}>
+            Cerrar
+          </button>
+        </div>
+
+        <section className="card">
+          <GoalInput
+            label="Edad"
+            value={draft.age}
+            onChange={(v) => setDraft((prev) => ({ ...prev, age: v }))}
+          />
+          <GoalInput
+            label="Peso (kg)"
+            value={draft.weightKg}
+            onChange={(v) => setDraft((prev) => ({ ...prev, weightKg: v }))}
+          />
+          <GoalInput
+            label="Altura (cm)"
+            value={draft.heightCm}
+            onChange={(v) => setDraft((prev) => ({ ...prev, heightCm: v }))}
+          />
+
+          <label style={{ display: "grid", gap: "0.3rem", marginBottom: "0.65rem" }}>
+            <span className="tiny muted">Sexo</span>
+            <select
+              value={draft.sex}
+              onChange={(e) => setDraft((prev) => ({ ...prev, sex: e.target.value as HealthSex }))}
+              className="input-like"
+            >
+              <option value="hombre">Hombre</option>
+              <option value="mujer">Mujer</option>
+            </select>
+          </label>
+
+          <label style={{ display: "grid", gap: "0.3rem" }}>
+            <span className="tiny muted">Actividad diaria</span>
+            <select
+              value={draft.activity}
+              onChange={(e) => setDraft((prev) => ({ ...prev, activity: e.target.value as ActivityLevel }))}
+              className="input-like"
+            >
+              <option value="sedentario">Sedentario</option>
+              <option value="ligero">Ligero (1-3 dias/semana)</option>
+              <option value="moderado">Moderado (3-5 dias/semana)</option>
+              <option value="alto">Alto (6-7 dias/semana)</option>
+            </select>
+          </label>
+        </section>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.8rem" }}>
+          <button type="button" className="btn secondary" onClick={onClose}>
+            Cancelar
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() =>
+              onSave({
+                age: clamp(draft.age, 12, 100),
+                weightKg: clamp(draft.weightKg, 30, 300),
+                heightCm: clamp(draft.heightCm, 120, 240),
+                sex: draft.sex,
+                activity: draft.activity
+              })
+            }
+          >
+            Guardar perfil
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FoodResultRow({
   food,
   onUpdateGrams,
@@ -737,6 +1045,21 @@ function FoodResultRow({
 }) {
   const confidencePct = Math.round(food.confidence * 100);
   const confidenceColor = confidencePct >= 85 ? "var(--neon)" : confidencePct >= 65 ? "var(--carbs)" : "var(--fat)";
+  const [gramsText, setGramsText] = useState(String(Math.round(food.estimatedGrams)));
+
+  useEffect(() => {
+    setGramsText(String(Math.round(food.estimatedGrams)));
+  }, [food.estimatedGrams]);
+
+  function commitGrams(raw: string) {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) {
+      onUpdateGrams(value);
+      setGramsText(String(Math.round(value)));
+      return;
+    }
+    setGramsText(String(Math.round(food.estimatedGrams)));
+  }
 
   return (
     <div className="food-row">
@@ -749,24 +1072,38 @@ function FoodResultRow({
         </p>
       </div>
       <div style={{ textAlign: "right" }}>
-        <input
-          type="number"
-          min={1}
-          defaultValue={Math.round(food.estimatedGrams)}
-          onBlur={(e) => {
-            const value = Number(e.target.value);
-            if (Number.isFinite(value) && value > 0) onUpdateGrams(value);
-          }}
-          style={{
-            width: 70,
-            background: "#0f0f14",
-            color: "white",
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: "0.6rem",
-            padding: "0.3rem 0.45rem",
-            textAlign: "right"
-          }}
-        />
+        <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          <button
+            type="button"
+            onClick={() => onUpdateGrams(Math.max(1, Math.round(food.estimatedGrams - 10)))}
+            style={gramAdjustButtonStyle}
+          >
+            -10
+          </button>
+          <input
+            type="number"
+            min={1}
+            value={gramsText}
+            onChange={(e) => setGramsText(e.target.value)}
+            onBlur={(e) => commitGrams(e.target.value)}
+            style={{
+              width: 70,
+              background: "#0f0f14",
+              color: "white",
+              border: "1px solid rgba(255,255,255,0.12)",
+              borderRadius: "0.6rem",
+              padding: "0.3rem 0.45rem",
+              textAlign: "right"
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => onUpdateGrams(Math.round(food.estimatedGrams + 10))}
+            style={gramAdjustButtonStyle}
+          >
+            +10
+          </button>
+        </div>
         <div className="tiny muted">gramos</div>
         <span
           className="badge"
@@ -969,6 +1306,308 @@ function labelForDay(dateIso: string): string {
     day: "numeric"
   });
 }
+
+function loadGoals(): Goals {
+  if (typeof window === "undefined") return DEFAULT_GOALS;
+  try {
+    const raw = window.localStorage.getItem(GOALS_KEY);
+    if (!raw) return DEFAULT_GOALS;
+    const parsed = JSON.parse(raw) as Partial<Goals>;
+    return {
+      calories: clamp(parsed.calories, 1000, 6000),
+      protein: clamp(parsed.protein, 20, 500),
+      carbs: clamp(parsed.carbs, 20, 700),
+      fat: clamp(parsed.fat, 10, 300)
+    };
+  } catch {
+    return DEFAULT_GOALS;
+  }
+}
+
+function saveGoals(goals: Goals): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(GOALS_KEY, JSON.stringify(goals));
+  } catch {
+    // Ignore storage write errors and keep app usable.
+  }
+}
+
+function defaultHealthProfile(): HealthProfile {
+  return {
+    age: 30,
+    weightKg: 70,
+    heightCm: 170,
+    sex: "hombre",
+    activity: "moderado"
+  };
+}
+
+function loadHealthProfile(): HealthProfile | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(PROFILE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<HealthProfile>;
+    const sex: HealthSex = parsed.sex === "mujer" ? "mujer" : "hombre";
+    const activity: ActivityLevel = isActivityLevel(parsed.activity) ? parsed.activity : "moderado";
+    return {
+      age: clamp(parsed.age, 12, 100),
+      weightKg: clamp(parsed.weightKg, 30, 300),
+      heightCm: clamp(parsed.heightCm, 120, 240),
+      sex,
+      activity
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveHealthProfile(profile: HealthProfile): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+  } catch {
+    // Ignore storage write errors and keep app usable.
+  }
+}
+
+function isActivityLevel(value: unknown): value is ActivityLevel {
+  return value === "sedentario" || value === "ligero" || value === "moderado" || value === "alto";
+}
+
+function evaluateHealthStatus(today: NutritionInfo, goals: Goals, profile: HealthProfile | null): {
+  bmi: { value: number; label: string; isHealthy: boolean };
+  tdee: number;
+  dietHealthy: boolean;
+  message: string;
+} {
+  if (!profile) {
+    return {
+      bmi: { value: 0, label: "Perfil pendiente", isHealthy: false },
+      tdee: 0,
+      dietHealthy: false,
+      message: "Completa tu perfil para calcular tu IMC y evaluar la calidad de tu dieta diaria."
+    };
+  }
+
+  const bmiValue = calculateBMI(profile.weightKg, profile.heightCm);
+  const bmi = bmiStatus(bmiValue);
+  const tdee = estimateTdee(profile);
+  const targetCalories = Math.max(goals.calories, 1200);
+  const calorieRatio = today.calories / Math.max(targetCalories, 1);
+  const proteinTarget = Math.max(profile.weightKg * 1.2, goals.protein * 0.8);
+  const fatPct = (today.fat * 9) / Math.max(today.calories, 1);
+  const carbPct = (today.carbs * 4) / Math.max(today.calories, 1);
+
+  const calorieOk = calorieRatio >= 0.75 && calorieRatio <= 1.2;
+  const proteinOk = today.protein >= proteinTarget * 0.75;
+  const macroSplitOk = fatPct >= 0.2 && fatPct <= 0.4 && carbPct >= 0.3 && carbPct <= 0.65;
+  const enoughData = today.calories >= targetCalories * 0.45;
+  const score = [calorieOk, proteinOk, macroSplitOk].filter(Boolean).length;
+  const dietHealthy = enoughData && score >= 2;
+
+  let message = "";
+  if (!enoughData) {
+    message = "Aun hay poca ingesta registrada hoy para evaluar tu dieta completa.";
+  } else if (dietHealthy && bmi.isHealthy) {
+    message = "Hoy vas en buena linea: dieta equilibrada y un IMC en rango saludable.";
+  } else if (!dietHealthy && bmi.isHealthy) {
+    message = "Tu IMC esta en buen rango, pero hoy la distribucion de macros/calorias se puede mejorar.";
+  } else if (dietHealthy && !bmi.isHealthy) {
+    message = "La dieta de hoy va bien, pero tu IMC esta fuera del rango saludable. Ajusta objetivos de forma progresiva.";
+  } else {
+    message = "Tanto tu IMC como la dieta de hoy son mejorables. Prioriza constancia y porciones realistas.";
+  }
+
+  return {
+    bmi,
+    tdee,
+    dietHealthy,
+    message
+  };
+}
+
+function calculateBMI(weightKg: number, heightCm: number): number {
+  const heightM = heightCm / 100;
+  if (!Number.isFinite(heightM) || heightM <= 0) return 0;
+  return weightKg / (heightM * heightM);
+}
+
+function bmiStatus(bmi: number): { value: number; label: string; isHealthy: boolean } {
+  if (!Number.isFinite(bmi) || bmi <= 0) {
+    return { value: 0, label: "Sin datos", isHealthy: false };
+  }
+  if (bmi < 18.5) {
+    return { value: bmi, label: "IMC bajo", isHealthy: false };
+  }
+  if (bmi < 25) {
+    return { value: bmi, label: "IMC bueno", isHealthy: true };
+  }
+  if (bmi < 30) {
+    return { value: bmi, label: "Sobrepeso", isHealthy: false };
+  }
+  return { value: bmi, label: "Obesidad", isHealthy: false };
+}
+
+function estimateTdee(profile: HealthProfile): number {
+  const baseBmr =
+    profile.sex === "hombre"
+      ? 10 * profile.weightKg + 6.25 * profile.heightCm - 5 * profile.age + 5
+      : 10 * profile.weightKg + 6.25 * profile.heightCm - 5 * profile.age - 161;
+
+  const multiplier = activityMultiplier(profile.activity);
+  return Math.max(1200, baseBmr * multiplier);
+}
+
+function activityMultiplier(activity: ActivityLevel): number {
+  switch (activity) {
+    case "sedentario":
+      return 1.2;
+    case "ligero":
+      return 1.375;
+    case "moderado":
+      return 1.55;
+    case "alto":
+      return 1.725;
+    default:
+      return 1.2;
+  }
+}
+
+function mergeSimilarFoods(foods: DetectedFood[]): DetectedFood[] {
+  const merged = new Map<string, DetectedFood>();
+
+  for (const food of foods) {
+    const key = `${food.category}:${normalizeFoodKey(food.name)}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...food });
+      continue;
+    }
+
+    const totalGrams = existing.estimatedGrams + food.estimatedGrams;
+    const weightedConfidence =
+      (existing.confidence * existing.estimatedGrams + food.confidence * food.estimatedGrams) / Math.max(totalGrams, 1);
+
+    merged.set(key, {
+      ...existing,
+      name: pickDisplayName(existing.name, food.name),
+      estimatedGrams: totalGrams,
+      confidence: Math.min(1, Math.max(0, weightedConfidence)),
+      nutrition: sumNutrition([existing.nutrition, food.nutrition])
+    });
+  }
+
+  return [...merged.values()].sort((a, b) => b.nutrition.calories - a.nutrition.calories);
+}
+
+function suggestMealName(foods: DetectedFood[]): string {
+  if (foods.length === 0) return "Comida Sainz";
+
+  const sorted = [...foods].sort((a, b) => b.nutrition.calories - a.nutrition.calories);
+  const topNames = sorted.slice(0, 2).map((food) => toTitleCase(food.name));
+
+  if (foods.length === 1) return topNames[0];
+  if (foods.length === 2) return `${topNames[0]} + ${topNames[1]}`;
+
+  const categories = new Set(foods.map((food) => food.category));
+  if (categories.size === 1) {
+    const only = foods[0].category;
+    if (only === "fruit") return "Snack de fruta";
+    if (only === "beverage") return "Bebida";
+    if (only === "protein") return "Comida proteica";
+  }
+
+  return `${topNames[0]} + ${topNames[1]}`;
+}
+
+function mealPeriodLabel(date: Date): string {
+  const hour = date.getHours();
+  if (hour >= 5 && hour < 11) return "Desayuno";
+  if (hour >= 11 && hour < 16) return "Comida";
+  if (hour >= 16 && hour < 20) return "Merienda";
+  return "Cena";
+}
+
+function buildMealNameForCurrentTime(baseName: string, date: Date): string {
+  const period = mealPeriodLabel(date);
+  const clean = baseName.trim();
+  if (!clean) return period;
+
+  const existingPeriods = ["desayuno", "comida", "merienda", "cena"];
+  const lower = clean.toLowerCase();
+  if (existingPeriods.some((p) => lower.startsWith(p))) return clean;
+
+  if (lower === "comida sainz" || lower === "comida") return period;
+
+  return `${period} - ${clean}`;
+}
+
+function normalizeFoodKey(name: string): string {
+  const stopWords = new Set(["de", "del", "la", "el", "con", "al", "a", "y"]);
+  const tokens = name
+    .toLowerCase()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 1 && !stopWords.has(token));
+
+  if (!tokens.length) return "comida";
+  return tokens.slice(0, 3).join(" ");
+}
+
+function pickDisplayName(a: string, b: string): string {
+  const normA = normalizeFoodKey(a);
+  const normB = normalizeFoodKey(b);
+  if (normB.length > normA.length) return b;
+  return a;
+}
+
+function toTitleCase(input: string): string {
+  return input
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function buildDailyInsight(today: NutritionInfo, goals: Goals): string {
+  const kcalRatio = today.calories / Math.max(goals.calories, 1);
+  const proteinRatio = today.protein / Math.max(goals.protein, 1);
+  const carbsRatio = today.carbs / Math.max(goals.carbs, 1);
+  const fatRatio = today.fat / Math.max(goals.fat, 1);
+
+  if (today.calories === 0) {
+    return "Aun no has registrado comida. Empieza con un escaneo para que Sainz.ai ajuste tus macros.";
+  }
+  if (kcalRatio > 1.1) {
+    return "Hoy vas por encima de calorias. Prioriza verduras y proteina magra en la siguiente comida.";
+  }
+  if (proteinRatio < 0.6 && kcalRatio >= 0.5) {
+    return "Vas corto de proteina. Te conviene anadir una fuente proteica en tu siguiente plato.";
+  }
+  if (carbsRatio > 1.1 && fatRatio < 0.8) {
+    return "Carbohidratos altos respecto al objetivo. Equilibra con mas proteina y algo de grasa saludable.";
+  }
+  if (kcalRatio < 0.55) {
+    return "Todavia tienes margen de energia. Manten una comida completa para cerrar el dia sin quedarte corto.";
+  }
+  return "Buen equilibrio general. Ajusta porciones en +/-10g para afinar el objetivo antes de guardar.";
+}
+
+const gramAdjustButtonStyle: CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.05)",
+  color: "white",
+  borderRadius: "0.55rem",
+  padding: "0.24rem 0.42rem",
+  cursor: "pointer",
+  fontSize: "0.73rem",
+  fontWeight: 700
+};
 
 function clamp(value: unknown, min: number, max: number): number {
   const n = typeof value === "number" ? value : Number(value);
