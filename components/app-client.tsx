@@ -272,7 +272,7 @@ function HomeScreen({
     <>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
         <div>
-          <div className="brand-chip">Sainz.ai NutriVision</div>
+          <div className="brand-chip">Sainz.ai</div>
           <p className="muted" style={{ margin: 0, fontSize: "1.95rem", fontWeight: 800 }}>
             {greeting}
           </p>
