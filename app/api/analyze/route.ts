@@ -2,14 +2,38 @@ import { NextRequest, NextResponse } from "next/server";
 import { GeminiFoodResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
-const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
-const MODEL_FALLBACKS = ["gemini-2.5-flash", "gemini-2.0-flash"];
+const DEFAULT_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-lite"];
+const ENV_MODEL_CHAIN = (process.env.GEMINI_MODEL_PREFERENCE ?? "")
+  .split(",")
+  .map((m) => m.trim())
+  .filter(Boolean);
+const GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || ENV_MODEL_CHAIN[0] || DEFAULT_MODEL_CHAIN[0];
+const MODEL_FALLBACKS = [...ENV_MODEL_CHAIN, ...DEFAULT_MODEL_CHAIN];
 
 type GeminiGenerateResponse = {
   candidates?: Array<{
     content?: { parts?: Array<{ text?: string }> };
   }>;
   error?: { message?: string };
+};
+
+type GeminiHttpErrorEnvelope = {
+  error?: {
+    code?: number;
+    message?: string;
+    status?: string;
+    details?: Array<Record<string, unknown>>;
+  };
+};
+
+type GeminiCallError = {
+  ok: false;
+  error: string;
+  statusCode: number;
+  quotaExceeded: boolean;
+  retryAfterSeconds: number | null;
+  quotaScopes: string[];
+  model: string;
 };
 
 const primaryPrompt = `Analiza esta imagen de comida.
@@ -76,12 +100,15 @@ export async function POST(req: NextRequest) {
     }
 
     let lastError = "Respuesta invalida del modelo.";
+    let lastCallError: GeminiCallError | null = null;
     const maxRetries = 1;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const prompt = attempt === 0 ? primaryPrompt : retryPrompt;
       const parsed = await callGemini({ apiKey, imageBase64, mimeType, prompt });
       if (!parsed.ok) {
         lastError = parsed.error;
+        lastCallError = parsed;
+        if (parsed.quotaExceeded) break;
         if (shouldRetry(parsed.error) && attempt < maxRetries) continue;
         break;
       }
@@ -93,9 +120,19 @@ export async function POST(req: NextRequest) {
       lastError = "No se detectaron alimentos.";
     }
 
+    const errorStatus = lastCallError?.quotaExceeded ? 429 : 502;
+    const dailyResetSeconds = secondsUntilPacificMidnight(new Date());
     return NextResponse.json(
-      { error: `Gemini no devolvio un resultado valido: ${lastError}` },
-      { status: 502 }
+      {
+        error: `Gemini no devolvio un resultado valido: ${lastError}`,
+        quotaExceeded: lastCallError?.quotaExceeded ?? false,
+        retryAfterSeconds: lastCallError?.retryAfterSeconds ?? null,
+        quotaScopes: lastCallError?.quotaScopes ?? [],
+        model: lastCallError?.model ?? null,
+        modelCandidates: getModelCandidates(),
+        dailyResetSeconds
+      },
+      { status: errorStatus }
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected server error.";
@@ -108,8 +145,9 @@ async function callGemini(input: {
   imageBase64: string;
   mimeType: string;
   prompt: string;
-}): Promise<{ ok: true; data: GeminiFoodResponse; model: string } | { ok: false; error: string }> {
+}): Promise<{ ok: true; data: GeminiFoodResponse; model: string } | GeminiCallError> {
   let lastError = "Gemini no devolvio respuesta valida.";
+  let lastCallError: GeminiCallError | null = null;
 
   for (const model of getModelCandidates()) {
     const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(model)}:generateContent?key=${input.apiKey}`;
@@ -143,12 +181,13 @@ async function callGemini(input: {
 
     const rawText = await response.text();
     if (!response.ok) {
-      const bestError = tryExtractError(rawText) ?? `Gemini API HTTP ${response.status}`;
-      lastError = bestError;
-      if (shouldTryNextModel(bestError, response.status)) {
+      const parsedError = parseGeminiApiError(rawText, response.status, model);
+      lastError = parsedError.error;
+      lastCallError = parsedError;
+      if (parsedError.quotaExceeded || shouldTryNextModel(parsedError.error, response.status)) {
         continue;
       }
-      return { ok: false, error: bestError };
+      return parsedError;
     }
 
     const envelope = safeJsonParse<GeminiGenerateResponse>(rawText);
@@ -172,7 +211,17 @@ async function callGemini(input: {
     return { ok: true, data: parsed, model };
   }
 
-  return { ok: false, error: lastError };
+  return (
+    lastCallError ?? {
+      ok: false,
+      error: lastError,
+      statusCode: 502,
+      quotaExceeded: false,
+      retryAfterSeconds: null,
+      quotaScopes: [],
+      model: getModelCandidates()[0] ?? GEMINI_MODEL
+    }
+  );
 }
 
 function parseFoodJson(raw: string): GeminiFoodResponse | null {
@@ -240,9 +289,77 @@ function safeJsonParse<T>(value: string): T | null {
   }
 }
 
-function tryExtractError(raw: string): string | null {
-  const parsed = safeJsonParse<{ error?: { message?: string } }>(raw);
-  return parsed?.error?.message?.trim() || null;
+function parseGeminiApiError(raw: string, statusCode: number, model: string): GeminiCallError {
+  const parsed = safeJsonParse<GeminiHttpErrorEnvelope>(raw);
+  const message = parsed?.error?.message?.trim() || `Gemini API HTTP ${statusCode}`;
+  const status = parsed?.error?.status?.trim() || "";
+  const details = Array.isArray(parsed?.error?.details) ? parsed.error.details : [];
+  const retryAfterSeconds = extractRetryAfterSeconds(details);
+  const quotaScopes = extractQuotaScopes(details);
+  const quotaExceeded =
+    statusCode === 429 ||
+    status.toUpperCase() === "RESOURCE_EXHAUSTED" ||
+    message.toLowerCase().includes("quota");
+
+  return {
+    ok: false,
+    error: message,
+    statusCode,
+    quotaExceeded,
+    retryAfterSeconds,
+    quotaScopes,
+    model
+  };
+}
+
+function extractRetryAfterSeconds(details: Array<Record<string, unknown>>): number | null {
+  for (const detail of details) {
+    const typeUrl = String(detail["@type"] ?? "");
+    if (!typeUrl.includes("google.rpc.RetryInfo")) continue;
+    const retryDelay = String(detail.retryDelay ?? "");
+    const match = retryDelay.match(/([\d.]+)s$/);
+    if (!match) continue;
+    const seconds = Number(match[1]);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.ceil(seconds);
+    }
+  }
+  return null;
+}
+
+function extractQuotaScopes(details: Array<Record<string, unknown>>): string[] {
+  const scopes = new Set<string>();
+
+  for (const detail of details) {
+    const typeUrl = String(detail["@type"] ?? "");
+    if (!typeUrl.includes("google.rpc.QuotaFailure")) continue;
+    const violations = Array.isArray(detail.violations) ? detail.violations : [];
+    for (const violation of violations) {
+      const record = (violation ?? {}) as Record<string, unknown>;
+      const quotaId = String(record.quotaId ?? "");
+      const lower = quotaId.toLowerCase();
+      if (lower.includes("perday") || lower.includes("daily")) scopes.add("day");
+      if (lower.includes("perminute") || lower.includes("minute")) scopes.add("minute");
+    }
+  }
+
+  return [...scopes];
+}
+
+function secondsUntilPacificMidnight(now: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).formatToParts(now);
+
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  const second = Number(parts.find((p) => p.type === "second")?.value ?? "0");
+  const elapsed = hour * 3600 + minute * 60 + second;
+  return Math.max(1, 86_400 - elapsed);
 }
 
 function clampNumber(value: unknown, min: number, max: number): number {

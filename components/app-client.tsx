@@ -33,10 +33,21 @@ const DEFAULT_GOALS: Goals = {
 const GOALS_KEY = "sainzcal_goals_v1";
 const PROFILE_KEY = "sainzcal_health_profile_v1";
 const PORTION_MEMORY_KEY = "sainzcal_portion_memory_v1";
+const API_USAGE_KEY = "sainzcal_gemini_api_usage_v1";
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
 
 type Tab = "home" | "history" | "health";
 type ScanPhase = "picker" | "analyzing" | "result";
+
+type AnalyzeErrorPayload = {
+  error?: string;
+  quotaExceeded?: boolean;
+  retryAfterSeconds?: number | null;
+  dailyResetSeconds?: number | null;
+  quotaScopes?: string[];
+  model?: string | null;
+  modelCandidates?: string[];
+};
 
 export default function AppClient() {
   const [tab, setTab] = useState<Tab>("home");
@@ -59,6 +70,11 @@ export default function AppClient() {
   const [showGoals, setShowGoals] = useState(false);
   const [profile, setProfile] = useState<HealthProfile | null>(null);
   const [showHealthProfile, setShowHealthProfile] = useState(false);
+  const [apiUsageToday, setApiUsageToday] = useState(0);
+  const [quotaExceeded, setQuotaExceeded] = useState(false);
+  const [quotaRetryUntilMs, setQuotaRetryUntilMs] = useState<number | null>(null);
+  const [quotaInfoMessage, setQuotaInfoMessage] = useState("");
+  const [clockMs, setClockMs] = useState(() => Date.now());
 
   const [detailMeal, setDetailMeal] = useState<MealLog | null>(null);
 
@@ -69,6 +85,7 @@ export default function AppClient() {
     setMeals(loadMeals());
     const parsedGoals = loadGoals();
     const storedProfile = loadHealthProfile();
+    setApiUsageToday(getApiUsageCountTodayPacific());
     setProfile(storedProfile);
     if (storedProfile) {
       const recommended = buildGoalsFromProfile(storedProfile);
@@ -77,6 +94,11 @@ export default function AppClient() {
     } else {
       setGoals(parsedGoals);
     }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const todayMeals = useMemo(() => meals.filter((meal) => isToday(meal.date)), [meals]);
@@ -137,8 +159,22 @@ export default function AppClient() {
         })
       });
 
+      const usageCount = registerApiUsageAttempt();
+      setApiUsageToday(usageCount);
+
       if (!response.ok) {
-        const errorPayload = (await response.json().catch(() => null)) as { error?: string } | null;
+        const errorPayload = (await response.json().catch(() => null)) as AnalyzeErrorPayload | null;
+        const retryAfterSeconds =
+          typeof errorPayload?.retryAfterSeconds === "number" && errorPayload.retryAfterSeconds > 0
+            ? Math.ceil(errorPayload.retryAfterSeconds)
+            : null;
+        if (retryAfterSeconds) {
+          setQuotaRetryUntilMs(Date.now() + retryAfterSeconds * 1000);
+        } else {
+          setQuotaRetryUntilMs(null);
+        }
+        setQuotaExceeded(Boolean(errorPayload?.quotaExceeded));
+        setQuotaInfoMessage(buildQuotaInfoMessage(errorPayload));
         throw new Error(errorPayload?.error || "Error al analizar la imagen.");
       }
 
@@ -147,6 +183,9 @@ export default function AppClient() {
         source?: string;
         model?: string;
       };
+      setQuotaExceeded(false);
+      setQuotaRetryUntilMs(null);
+      setQuotaInfoMessage("");
       const rawFoods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
       const foods = mergeSimilarFoods(rawFoods);
 
@@ -253,6 +292,8 @@ export default function AppClient() {
   const progressStyle = {
     "--progress": Math.round(progress * 100)
   } as CSSProperties;
+  const quotaRetryLeftSeconds = quotaRetryUntilMs ? Math.max(0, Math.ceil((quotaRetryUntilMs - clockMs) / 1000)) : 0;
+  const apiResetLeftSeconds = secondsUntilPacificMidnight(new Date(clockMs));
 
   return (
     <>
@@ -337,6 +378,11 @@ export default function AppClient() {
           isSaving={isSaving}
           requiresSaveConfirmation={requiresSaveConfirmation}
           saveConfirmed={saveConfirmed}
+          apiUsageToday={apiUsageToday}
+          apiResetLeftSeconds={apiResetLeftSeconds}
+          quotaExceeded={quotaExceeded}
+          quotaRetryLeftSeconds={quotaRetryLeftSeconds}
+          quotaInfoMessage={quotaInfoMessage}
           source={analysisSource}
           model={analysisModel}
           cameraInputRef={cameraInputRef}
@@ -747,6 +793,11 @@ function ScanModal({
   isSaving,
   requiresSaveConfirmation,
   saveConfirmed,
+  apiUsageToday,
+  apiResetLeftSeconds,
+  quotaExceeded,
+  quotaRetryLeftSeconds,
+  quotaInfoMessage,
   source,
   model,
   cameraInputRef,
@@ -770,6 +821,11 @@ function ScanModal({
   isSaving: boolean;
   requiresSaveConfirmation: boolean;
   saveConfirmed: boolean;
+  apiUsageToday: number;
+  apiResetLeftSeconds: number;
+  quotaExceeded: boolean;
+  quotaRetryLeftSeconds: number;
+  quotaInfoMessage: string;
   source: string;
   model: string;
   cameraInputRef: React.RefObject<HTMLInputElement | null>;
@@ -797,6 +853,29 @@ function ScanModal({
             Cerrar
           </button>
         </div>
+
+        <section className="card api-usage-card">
+          <div className="section-head" style={{ marginBottom: "0.45rem" }}>
+            <strong>Uso de Gemini</strong>
+            <span className="muted tiny">contador local</span>
+          </div>
+          <p className="muted tiny" style={{ margin: "0 0 0.35rem" }}>
+            Solicitudes hoy: <strong>{apiUsageToday}</strong>
+          </p>
+          <p className="muted tiny" style={{ margin: 0 }}>
+            Reinicio cuota diaria (RPD): {formatDurationCompact(apiResetLeftSeconds)} (medianoche PT)
+          </p>
+          {quotaExceeded ? (
+            <p className="tiny" style={{ margin: "0.45rem 0 0", color: "var(--carbs)" }}>
+              Cuota agotada{quotaRetryLeftSeconds > 0 ? ` · reintento sugerido en ${formatDurationCompact(quotaRetryLeftSeconds)}` : ""}.
+            </p>
+          ) : null}
+          {quotaInfoMessage ? (
+            <p className="muted tiny" style={{ margin: "0.35rem 0 0" }}>
+              {quotaInfoMessage}
+            </p>
+          ) : null}
+        </section>
 
         {phase === "picker" && (
           <>
@@ -1507,6 +1586,111 @@ function labelForDay(dateIso: string): string {
     month: "short",
     day: "numeric"
   });
+}
+
+function registerApiUsageAttempt(): number {
+  if (typeof window === "undefined") return 0;
+  const dayKey = pacificDayKey(new Date());
+  const current = loadApiUsageCounter();
+  if (current.dayKey !== dayKey) {
+    const next = { dayKey, count: 1 };
+    saveApiUsageCounter(next);
+    return 1;
+  }
+  const nextCount = current.count + 1;
+  saveApiUsageCounter({ dayKey, count: nextCount });
+  return nextCount;
+}
+
+function getApiUsageCountTodayPacific(): number {
+  if (typeof window === "undefined") return 0;
+  const dayKey = pacificDayKey(new Date());
+  const current = loadApiUsageCounter();
+  return current.dayKey === dayKey ? current.count : 0;
+}
+
+function loadApiUsageCounter(): { dayKey: string; count: number } {
+  if (typeof window === "undefined") return { dayKey: "", count: 0 };
+  try {
+    const raw = window.localStorage.getItem(API_USAGE_KEY);
+    if (!raw) return { dayKey: "", count: 0 };
+    const parsed = JSON.parse(raw) as { dayKey?: string; count?: number };
+    return {
+      dayKey: typeof parsed.dayKey === "string" ? parsed.dayKey : "",
+      count: clamp(parsed.count, 0, 1_000_000)
+    };
+  } catch {
+    return { dayKey: "", count: 0 };
+  }
+}
+
+function saveApiUsageCounter(next: { dayKey: string; count: number }): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(API_USAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage write errors and keep app usable.
+  }
+}
+
+function pacificDayKey(date: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+
+  const year = parts.find((p) => p.type === "year")?.value ?? "0000";
+  const month = parts.find((p) => p.type === "month")?.value ?? "00";
+  const day = parts.find((p) => p.type === "day")?.value ?? "00";
+  return `${year}-${month}-${day}`;
+}
+
+function secondsUntilPacificMidnight(now: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).formatToParts(now);
+
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  const second = Number(parts.find((p) => p.type === "second")?.value ?? "0");
+  const elapsed = hour * 3600 + minute * 60 + second;
+  return Math.max(1, 86_400 - elapsed);
+}
+
+function formatDurationCompact(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function buildQuotaInfoMessage(payload: AnalyzeErrorPayload | null): string {
+  if (!payload) return "";
+  const scopes = payload.quotaScopes ?? [];
+  const scopeText =
+    scopes.includes("day") && scopes.includes("minute")
+      ? "minuto y dia"
+      : scopes.includes("minute")
+        ? "minuto"
+        : scopes.includes("day")
+          ? "dia"
+          : "";
+  const modelText = payload.model ? `Modelo: ${payload.model}. ` : "";
+  const scopeInfo = scopeText ? `Cuota afectada: ${scopeText}. ` : "";
+  const fallbackInfo =
+    payload.modelCandidates && payload.modelCandidates.length > 1
+      ? `Fallback activo: ${payload.modelCandidates.join(" -> ")}.`
+      : "";
+  return `${modelText}${scopeInfo}${fallbackInfo}`.trim();
 }
 
 function loadGoals(): Goals {

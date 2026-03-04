@@ -114,6 +114,12 @@ input {
   font-size: 0.84rem;
 }
 
+.api-usage-card {
+  margin-bottom: 0.8rem;
+  padding-top: 0.9rem;
+  padding-bottom: 0.9rem;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
