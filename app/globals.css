@@ -120,6 +120,83 @@ input {
   padding-bottom: 0.9rem;
 }
 
+.yuka-card {
+  border-color: rgba(143, 234, 124, 0.35);
+  background: linear-gradient(180deg, rgba(40, 59, 40, 0.35) 0%, #17171d 100%);
+}
+
+.yuka-score {
+  font-size: 2.05rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.yuka-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.7rem;
+}
+
+.yuka-tag {
+  font-size: 0.73rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.2rem 0.5rem;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.yuka-grade {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 900;
+  color: #111;
+}
+
+.yuka-a,
+.food-grade-a {
+  background: #6fe06e;
+}
+
+.yuka-b,
+.food-grade-b {
+  background: #9ce86b;
+}
+
+.yuka-c,
+.food-grade-c {
+  background: #ffd666;
+}
+
+.yuka-d,
+.food-grade-d {
+  background: #ff9b67;
+}
+
+.yuka-e,
+.food-grade-e {
+  background: #ff6d6d;
+}
+
+.food-grade {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0.4rem;
+  width: 19px;
+  height: 19px;
+  border-radius: 999px;
+  color: #101010;
+  font-size: 0.65rem;
+  font-weight: 900;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;

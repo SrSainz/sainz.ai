@@ -842,6 +842,7 @@ function ScanModal({
   const totals = sumNutrition(foods.map((food) => food.nutrition));
   const avgConfidence = foods.length ? foods.reduce((acc, food) => acc + food.confidence, 0) / foods.length : 0;
   const calidadIA = avgConfidence >= 0.85 ? "Alta" : avgConfidence >= 0.65 ? "Media" : "Baja";
+  const mealHealth = evaluateMealHealthScore(foods);
 
   return (
     <div className="overlay">
@@ -980,6 +981,24 @@ function ScanModal({
                   <div>{Math.round(totals.fat)}g</div>
                   <div className="tiny muted">Grasa</div>
                 </div>
+              </div>
+            </section>
+
+            <section className="card yuka-card" style={{ marginTop: "0.8rem" }}>
+              <div className="section-head">
+                <strong>Indice de salud</strong>
+                <span className={`yuka-grade yuka-${mealHealth.grade.toLowerCase()}`}>{mealHealth.grade}</span>
+              </div>
+              <div className="yuka-score">{mealHealth.score}/100</div>
+              <p className="muted" style={{ margin: "0.35rem 0 0" }}>
+                {mealHealth.summary}
+              </p>
+              <div className="yuka-tags">
+                {mealHealth.highlights.map((item) => (
+                  <span key={item} className="yuka-tag">
+                    {item}
+                  </span>
+                ))}
               </div>
             </section>
 
@@ -1320,6 +1339,7 @@ function FoodResultRow({
 }) {
   const confidencePct = Math.round(food.confidence * 100);
   const confidenceColor = confidencePct >= 85 ? "var(--neon)" : confidencePct >= 65 ? "var(--carbs)" : "var(--fat)";
+  const foodHealth = evaluateFoodHealthScore(food);
   const [gramsText, setGramsText] = useState(String(Math.round(food.estimatedGrams)));
 
   useEffect(() => {
@@ -1340,7 +1360,9 @@ function FoodResultRow({
     <div className="food-row">
       <div style={{ width: 34, textAlign: "center" }}>{categoryEmoji(food.category)}</div>
       <div style={{ flex: 1 }}>
-        <p className="food-name">{food.name}</p>
+        <p className="food-name">
+          {food.name} <span className={`food-grade food-grade-${foodHealth.grade.toLowerCase()}`}>{foodHealth.grade}</span>
+        </p>
         <p className="tiny muted" style={{ margin: 0 }}>
           <span className="kcal">{Math.round(food.nutrition.calories)} kcal</span> - P {Math.round(food.nutrition.protein)}g / C{" "}
           {Math.round(food.nutrition.carbs)}g / F {Math.round(food.nutrition.fat)}g
@@ -1447,8 +1469,16 @@ function MacroRow({
   );
 }
 
-function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null {
-  const name = String(food.name ?? "").trim();
+type VisionFoodPayload = GeminiFoodItem & {
+  is_packaged?: boolean;
+  brand?: string;
+  product_name?: string;
+  barcode?: string;
+  nutrition_source?: "ai" | "db" | "product";
+};
+
+function mapGeminiFoodToDetectedFood(food: VisionFoodPayload): DetectedFood | null {
+  const name = String(food.product_name ?? food.name ?? "").trim();
   if (!name) return null;
 
   const rawGrams = clamp(food.grams, 0, 2000);
@@ -1463,6 +1493,7 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
   const personalizedGrams = applyPersonalPortionFactor(name, sanitizedGrams);
   const safeGrams = clamp(personalizedGrams, 20, 2000);
   const knownFood = hasKnownFoodMatch(name);
+  const isPackaged = Boolean(food.is_packaged) || food.nutrition_source === "product";
 
   const aiAdjustedStrongly = safeGrams / Math.max(baseGrams, 1) > 1.5 || safeGrams / Math.max(baseGrams, 1) < 0.65;
   if (aiAdjustedStrongly) {
@@ -1479,11 +1510,15 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
   };
   const nutrition = choosePrecisionNutrition({
     knownFood,
+    isPackaged,
     aiNutrition,
     fallbackNutrition: fallback,
     aiRawGrams: baseGrams,
     finalGrams: safeGrams
   });
+  if (isPackaged) {
+    confidence = Math.max(confidence, 0.95);
+  }
 
   return {
     id: generateId(),
@@ -1497,11 +1532,21 @@ function mapGeminiFoodToDetectedFood(food: GeminiFoodItem): DetectedFood | null 
 
 function choosePrecisionNutrition(input: {
   knownFood: boolean;
+  isPackaged: boolean;
   aiNutrition: NutritionInfo;
   fallbackNutrition: NutritionInfo;
   aiRawGrams: number;
   finalGrams: number;
 }): NutritionInfo {
+  if (input.isPackaged) {
+    return {
+      calories: Math.max(0, input.aiNutrition.calories),
+      protein: Math.max(0, input.aiNutrition.protein),
+      carbs: Math.max(0, input.aiNutrition.carbs),
+      fat: Math.max(0, input.aiNutrition.fat),
+      fiber: 0
+    };
+  }
   if (input.knownFood) return input.fallbackNutrition;
 
   const hasAiValues =
@@ -2060,6 +2105,131 @@ function rememberPortionAdjustment(name: string, fromGrams: number, toGrams: num
   const smoothed = clamp(current * 0.7 + newFactor * 0.3, 0.75, 1.25);
   memory[key] = smoothed;
   savePortionMemory(memory);
+}
+
+function evaluateFoodHealthScore(food: DetectedFood): { score: number; grade: "A" | "B" | "C" | "D" | "E"; reasons: string[] } {
+  const grams = Math.max(food.estimatedGrams, 1);
+  const kcal100 = (food.nutrition.calories * 100) / grams;
+  const protein100 = (food.nutrition.protein * 100) / grams;
+  const carbs100 = (food.nutrition.carbs * 100) / grams;
+  const fat100 = (food.nutrition.fat * 100) / grams;
+  const fiber100 = (food.nutrition.fiber * 100) / grams;
+  const key = normalizeFoodKey(food.name);
+
+  let score = 60;
+  const reasons: string[] = [];
+
+  if (kcal100 > 320) {
+    score -= 24;
+    reasons.push("Alta densidad calorica");
+  } else if (kcal100 > 220) {
+    score -= 14;
+  } else if (kcal100 < 90) {
+    score += 8;
+  }
+
+  const estimatedSugar100 = food.category === "beverage" ? carbs100 : carbs100 * 0.45;
+  if (estimatedSugar100 > 10) {
+    score -= 20;
+    reasons.push("Azucar estimado alto");
+  } else if (estimatedSugar100 < 3) {
+    score += 6;
+  }
+
+  if (fat100 > 18) {
+    score -= 12;
+  } else if (fat100 < 6) {
+    score += 3;
+  }
+
+  if (fiber100 > 6) {
+    score += 12;
+    reasons.push("Fibra alta");
+  } else if (fiber100 > 3) {
+    score += 6;
+  }
+
+  if (protein100 > 12) {
+    score += 8;
+  } else if (protein100 > 7) {
+    score += 4;
+  }
+
+  if (food.category === "fruit" || food.category === "vegetable") {
+    score += 10;
+    reasons.push("Alimento natural");
+  }
+
+  if (containsAny(key, ["cola", "refresco", "soda", "cookie", "chips", "bolleria", "snack"])) {
+    score -= 16;
+    reasons.push("Ultraprocesado probable");
+  }
+
+  const bounded = clamp(score, 0, 100);
+  return {
+    score: Math.round(bounded),
+    grade: healthGradeFromScore(bounded),
+    reasons
+  };
+}
+
+function evaluateMealHealthScore(foods: DetectedFood[]): {
+  score: number;
+  grade: "A" | "B" | "C" | "D" | "E";
+  summary: string;
+  highlights: string[];
+} {
+  if (!foods.length) {
+    return {
+      score: 0,
+      grade: "E",
+      summary: "No hay alimentos para evaluar.",
+      highlights: ["Sin datos"]
+    };
+  }
+
+  const totalCalories = foods.reduce((acc, food) => acc + food.nutrition.calories, 0);
+  const weighted = foods.reduce((acc, food) => {
+    const health = evaluateFoodHealthScore(food);
+    const weight = totalCalories > 0 ? food.nutrition.calories / totalCalories : 1 / foods.length;
+    return acc + health.score * weight;
+  }, 0);
+
+  const roundedScore = Math.round(clamp(weighted, 0, 100));
+  const grade = healthGradeFromScore(roundedScore);
+  const highlights = summarizeHealthHighlights(foods);
+  return {
+    score: roundedScore,
+    grade,
+    summary: mealHealthSummary(grade),
+    highlights
+  };
+}
+
+function healthGradeFromScore(score: number): "A" | "B" | "C" | "D" | "E" {
+  if (score >= 85) return "A";
+  if (score >= 70) return "B";
+  if (score >= 55) return "C";
+  if (score >= 35) return "D";
+  return "E";
+}
+
+function mealHealthSummary(grade: "A" | "B" | "C" | "D" | "E"): string {
+  if (grade === "A") return "Muy buena calidad nutricional para esta comida.";
+  if (grade === "B") return "Buena calidad nutricional con margen pequeno de mejora.";
+  if (grade === "C") return "Calidad intermedia: revisa porciones y composicion.";
+  if (grade === "D") return "Calidad baja: conviene reducir azucar o ultraprocesados.";
+  return "Calidad muy baja: intenta alternativas mas naturales y densas en nutrientes.";
+}
+
+function summarizeHealthHighlights(foods: DetectedFood[]): string[] {
+  const tags = new Set<string>();
+  for (const food of foods) {
+    const evaluated = evaluateFoodHealthScore(food);
+    for (const reason of evaluated.reasons) tags.add(reason);
+  }
+  if (!tags.size) tags.add("Perfil equilibrado");
+  return [...tags].slice(0, 3);
 }
 
 function pickDisplayName(a: string, b: string): string {
