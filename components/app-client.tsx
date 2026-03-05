@@ -576,15 +576,15 @@ function HomeScreen({
           </p>
         ) : (
           todayMeals.map((meal) => (
-            <div key={meal.id} className="meal-row">
+            <div key={meal.id} className="meal-row meal-row-compact">
               {meal.imageDataUrl ? <img className="thumb" src={meal.imageDataUrl} alt={meal.mealName} /> : <div className="thumb" />}
-              <div style={{ flex: 1 }}>
-                <p style={{ margin: 0, fontWeight: 700 }}>{meal.mealName}</p>
-                <p className="muted tiny" style={{ margin: "0.1rem 0 0" }}>
+              <div className="meal-main">
+                <p className="meal-title">{meal.mealName}</p>
+                <p className="meal-meta muted tiny">
                   {formatTime(meal.date)}
                 </p>
               </div>
-              <div style={{ textAlign: "right" }}>
+              <div className="meal-actions">
                 <div className="kcal">{Math.round(meal.totalCalories)}</div>
                 <div className="muted tiny">kcal</div>
               </div>
@@ -735,39 +735,25 @@ function HistoryScreen({
             </div>
             <section className="card">
               {group.meals.map((meal) => (
-                <div key={meal.id} className="meal-row" style={{ alignItems: "flex-start" }}>
+                <div key={meal.id} className="meal-row history-meal-row">
                   {meal.imageDataUrl ? <img className="thumb" src={meal.imageDataUrl} alt={meal.mealName} /> : <div className="thumb" />}
                   <button
                     type="button"
-                    style={{
-                      flex: 1,
-                      background: "transparent",
-                      border: 0,
-                      color: "inherit",
-                      textAlign: "left",
-                      cursor: "pointer",
-                      padding: 0
-                    }}
+                    className="meal-main meal-main-btn"
                     onClick={() => onOpenDetail(meal)}
                   >
-                    <p style={{ margin: 0, fontWeight: 700 }}>{meal.mealName}</p>
-                    <p className="muted tiny" style={{ margin: "0.15rem 0 0" }}>
+                    <p className="meal-title">{meal.mealName}</p>
+                    <p className="meal-meta muted tiny">
                       {formatTime(meal.date)} - P {Math.round(meal.totalProtein)}g / C {Math.round(meal.totalCarbs)}g / F{" "}
                       {Math.round(meal.totalFat)}g
                     </p>
                   </button>
-                  <div style={{ textAlign: "right" }}>
+                  <div className="meal-actions">
                     <div className="kcal">{Math.round(meal.totalCalories)}</div>
                     <button
                       type="button"
                       onClick={() => onDelete(meal.id)}
-                      style={{
-                        marginTop: "0.2rem",
-                        border: 0,
-                        background: "transparent",
-                        color: "#ff8a8a",
-                        cursor: "pointer"
-                      }}
+                      className="delete-btn"
                     >
                       Eliminar
                     </button>
@@ -1342,10 +1328,6 @@ function FoodResultRow({
   const foodHealth = evaluateFoodHealthScore(food);
   const [gramsText, setGramsText] = useState(String(Math.round(food.estimatedGrams)));
 
-  useEffect(() => {
-    setGramsText(String(Math.round(food.estimatedGrams)));
-  }, [food.estimatedGrams]);
-
   function commitGrams(raw: string) {
     const value = Number(raw);
     if (Number.isFinite(value) && value > 0) {
@@ -1372,7 +1354,11 @@ function FoodResultRow({
         <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
           <button
             type="button"
-            onClick={() => onUpdateGrams(Math.max(1, Math.round(food.estimatedGrams - 10)))}
+            onClick={() => {
+              const next = Math.max(1, Math.round(food.estimatedGrams - 10));
+              onUpdateGrams(next);
+              setGramsText(String(next));
+            }}
             style={gramAdjustButtonStyle}
           >
             -10
@@ -1395,7 +1381,11 @@ function FoodResultRow({
           />
           <button
             type="button"
-            onClick={() => onUpdateGrams(Math.round(food.estimatedGrams + 10))}
+            onClick={() => {
+              const next = Math.round(food.estimatedGrams + 10);
+              onUpdateGrams(next);
+              setGramsText(String(next));
+            }}
             style={gramAdjustButtonStyle}
           >
             +10
