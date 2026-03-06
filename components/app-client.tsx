@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { categoryEmoji, categoryForFood, hasKnownFoodMatch, lookupNutrition } from "@/lib/nutrition-db";
 import { compressImageToBase64 } from "@/lib/image";
@@ -603,7 +604,11 @@ function HomeScreen({
         ) : (
           todayMeals.map((meal) => (
             <div key={meal.id} className="meal-row meal-row-compact">
-              {meal.imageDataUrl ? <img className="thumb" src={meal.imageDataUrl} alt={meal.mealName} /> : <div className="thumb" />}
+              {meal.imageDataUrl ? (
+                <Image className="thumb" src={meal.imageDataUrl} alt={meal.mealName} width={52} height={52} unoptimized />
+              ) : (
+                <div className="thumb" />
+              )}
               <div className="meal-main">
                 <p className="meal-title">{meal.mealName}</p>
                 <p className="meal-meta muted tiny">
@@ -762,7 +767,11 @@ function HistoryScreen({
             <section className="card">
               {group.meals.map((meal) => (
                 <div key={meal.id} className="meal-row history-meal-row">
-                  {meal.imageDataUrl ? <img className="thumb" src={meal.imageDataUrl} alt={meal.mealName} /> : <div className="thumb" />}
+                  {meal.imageDataUrl ? (
+                    <Image className="thumb" src={meal.imageDataUrl} alt={meal.mealName} width={52} height={52} unoptimized />
+                  ) : (
+                    <div className="thumb" />
+                  )}
                   <button
                     type="button"
                     className="meal-main meal-main-btn"
@@ -950,14 +959,33 @@ function ScanModal({
               La IA esta identificando alimentos y calculando nutricion.
             </p>
             {imageDataUrl ? (
-              <img src={imageDataUrl} alt="Comida seleccionada" className="result-image" style={{ marginTop: "1rem", height: 130 }} />
+              <Image
+                src={imageDataUrl}
+                alt="Comida seleccionada"
+                className="result-image"
+                style={{ marginTop: "1rem", height: 130 }}
+                width={1200}
+                height={800}
+                sizes="100vw"
+                unoptimized
+              />
             ) : null}
           </section>
         )}
 
         {phase === "result" && (
           <>
-            {imageDataUrl ? <img src={imageDataUrl} alt="Resultado del escaneo" className="result-image" /> : null}
+            {imageDataUrl ? (
+              <Image
+                src={imageDataUrl}
+                alt="Resultado del escaneo"
+                className="result-image"
+                width={1200}
+                height={800}
+                sizes="100vw"
+                unoptimized
+              />
+            ) : null}
 
             {warning ? (
               <section className="card" style={{ marginTop: "0.8rem", borderColor: "rgba(255,196,71,0.55)" }}>
@@ -1111,7 +1139,17 @@ function MealDetailModal({ meal, onClose }: { meal: MealLog; onClose: () => void
           </button>
         </div>
 
-        {meal.imageDataUrl ? <img className="result-image" src={meal.imageDataUrl} alt={meal.mealName} /> : null}
+        {meal.imageDataUrl ? (
+          <Image
+            className="result-image"
+            src={meal.imageDataUrl}
+            alt={meal.mealName}
+            width={1200}
+            height={800}
+            sizes="100vw"
+            unoptimized
+          />
+        ) : null}
 
         <section className="card" style={{ marginTop: "0.8rem" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", textAlign: "center", gap: "0.4rem" }}>
