@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { categoryEmoji, categoryForFood, hasKnownFoodMatch, lookupNutrition } from "@/lib/nutrition-db";
-import { compressImageToBase64 } from "@/lib/image";
+import { assessImageQuality, compressImageToBase64, detectBarcodeFromFile } from "@/lib/image";
 import { addMeal, deleteMeal, isToday, isYesterday, loadMeals } from "@/lib/storage";
 import { DetectedFood, GeminiFoodItem, GeminiFoodResponse, MealLog, NutritionInfo } from "@/lib/types";
 
@@ -34,6 +34,7 @@ const DEFAULT_GOALS: Goals = {
 const GOALS_KEY = "sainzcal_goals_v1";
 const PROFILE_KEY = "sainzcal_health_profile_v1";
 const PORTION_MEMORY_KEY = "sainzcal_portion_memory_v1";
+const FOOD_ALIAS_KEY = "sainzcal_food_alias_v1";
 const API_USAGE_KEY = "sainzcal_gemini_api_usage_v1";
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
 
@@ -78,6 +79,9 @@ export default function AppClient() {
   const [clockMs, setClockMs] = useState(() => Date.now());
   const [lastImageBase64, setLastImageBase64] = useState("");
   const [lastImageMimeType, setLastImageMimeType] = useState("image/jpeg");
+  const [lastDetectedBarcode, setLastDetectedBarcode] = useState("");
+  const [qualityGatePending, setQualityGatePending] = useState(false);
+  const [qualityGateMessage, setQualityGateMessage] = useState("");
 
   const [detailMeal, setDetailMeal] = useState<MealLog | null>(null);
 
@@ -125,6 +129,9 @@ export default function AppClient() {
     setSaveConfirmed(true);
     setLastImageBase64("");
     setLastImageMimeType("image/jpeg");
+    setLastDetectedBarcode("");
+    setQualityGatePending(false);
+    setQualityGateMessage("");
   }
 
   function closeScan() {
@@ -140,6 +147,9 @@ export default function AppClient() {
     setSaveConfirmed(true);
     setLastImageBase64("");
     setLastImageMimeType("image/jpeg");
+    setLastDetectedBarcode("");
+    setQualityGatePending(false);
+    setQualityGateMessage("");
   }
 
   async function onImagePicked(event: ChangeEvent<HTMLInputElement>) {
@@ -153,7 +163,23 @@ export default function AppClient() {
       setSelectedImageDataUrl(`data:${mimeType};base64,${base64}`);
       setLastImageBase64(base64);
       setLastImageMimeType(mimeType);
-      await runAnalyze(base64, mimeType);
+
+      const barcode = await detectBarcodeFromFile(file);
+      setLastDetectedBarcode(barcode ?? "");
+
+      const quality = await assessImageQuality(file);
+      if (!quality.ok) {
+        setQualityGatePending(true);
+        const warning = quality.warnings.length > 0 ? quality.warnings.join(" ") : "La imagen no tiene calidad suficiente.";
+        setQualityGateMessage(`Calidad baja (${quality.score}/100). ${warning}`);
+        setScanError(`Calidad baja (${quality.score}/100). ${warning}`);
+        setScanPhase("picker");
+        return;
+      }
+
+      setQualityGatePending(false);
+      setQualityGateMessage("");
+      await runAnalyze(base64, mimeType, barcode ?? "");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
       setScanError(message);
@@ -165,7 +191,7 @@ export default function AppClient() {
     if (!lastImageBase64) return;
     setSelectedImageDataUrl(`data:${lastImageMimeType};base64,${lastImageBase64}`);
     try {
-      await runAnalyze(lastImageBase64, lastImageMimeType);
+      await runAnalyze(lastImageBase64, lastImageMimeType, lastDetectedBarcode);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
       setScanError(message);
@@ -173,7 +199,21 @@ export default function AppClient() {
     }
   }
 
-  async function runAnalyze(base64: string, mimeType: string) {
+  async function analyzeDespiteQuality() {
+    if (!lastImageBase64) return;
+    setQualityGatePending(false);
+    setQualityGateMessage("");
+    setSelectedImageDataUrl(`data:${lastImageMimeType};base64,${lastImageBase64}`);
+    try {
+      await runAnalyze(lastImageBase64, lastImageMimeType, lastDetectedBarcode);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
+      setScanError(message);
+      setScanPhase("picker");
+    }
+  }
+
+  async function runAnalyze(base64: string, mimeType: string, barcodeHint = "") {
     setScanError("");
     setScanWarning("");
     setSaveError("");
@@ -184,7 +224,8 @@ export default function AppClient() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         imageBase64: base64,
-        mimeType
+        mimeType,
+        barcodeHint: barcodeHint || undefined
       })
     });
 
@@ -266,6 +307,29 @@ export default function AppClient() {
     if (!stillNeedsConfirmation) {
       setSaveConfirmed(true);
     }
+  }
+
+  function renameFood(id: string, nextName: string) {
+    const trimmed = nextName.trim();
+    if (!trimmed) return;
+
+    setDetectedFoods((prev) =>
+      prev.map((food) => {
+        if (food.id !== id) return food;
+        const resolvedName = toTitleCase(trimmed);
+        const updatedCategory = categoryForFood(resolvedName);
+        const updatedNutrition = lookupNutrition(resolvedName, food.estimatedGrams);
+        rememberFoodAlias(food.name, resolvedName);
+        return {
+          ...food,
+          name: resolvedName,
+          category: updatedCategory,
+          nutrition: {
+            ...updatedNutrition
+          }
+        };
+      })
+    );
   }
 
   function saveCurrentMeal() {
@@ -411,11 +475,15 @@ export default function AppClient() {
           model={analysisModel}
           cameraInputRef={cameraInputRef}
           galleryInputRef={galleryInputRef}
+          qualityGatePending={qualityGatePending}
+          qualityGateMessage={qualityGateMessage}
           onClose={closeScan}
           onImagePicked={onImagePicked}
           onRetryAnalyze={retryLastAnalyze}
+          onAnalyzeDespiteQuality={analyzeDespiteQuality}
           onMealNameChange={setMealName}
           onUpdateGrams={updateFoodGrams}
+          onRenameFood={renameFood}
           onDeleteFood={removeFood}
           onSave={saveCurrentMeal}
           onSaveConfirmedChange={setSaveConfirmed}
@@ -432,6 +500,9 @@ export default function AppClient() {
             setSaveConfirmed(true);
             setLastImageBase64("");
             setLastImageMimeType("image/jpeg");
+            setLastDetectedBarcode("");
+            setQualityGatePending(false);
+            setQualityGateMessage("");
           }}
         />
       )}
@@ -754,7 +825,7 @@ function HistoryScreen({
       {groups.length === 0 ? (
         <section className="card">
           <p className="muted" style={{ margin: 0 }}>
-            No hay historial todavia. Guarda tu primer escaneo.
+            No hay historial todavía. Guarda tu primer escaneo.
           </p>
         </section>
       ) : (
@@ -823,11 +894,15 @@ function ScanModal({
   model,
   cameraInputRef,
   galleryInputRef,
+  qualityGatePending,
+  qualityGateMessage,
   onClose,
   onImagePicked,
   onRetryAnalyze,
+  onAnalyzeDespiteQuality,
   onMealNameChange,
   onUpdateGrams,
+  onRenameFood,
   onDeleteFood,
   onSave,
   onSaveConfirmedChange,
@@ -852,11 +927,15 @@ function ScanModal({
   model: string;
   cameraInputRef: React.RefObject<HTMLInputElement | null>;
   galleryInputRef: React.RefObject<HTMLInputElement | null>;
+  qualityGatePending: boolean;
+  qualityGateMessage: string;
   onClose: () => void;
   onImagePicked: (e: ChangeEvent<HTMLInputElement>) => Promise<void>;
   onRetryAnalyze: () => Promise<void>;
+  onAnalyzeDespiteQuality: () => Promise<void>;
   onMealNameChange: (name: string) => void;
   onUpdateGrams: (id: string, grams: number) => void;
+  onRenameFood: (id: string, name: string) => void;
   onDeleteFood: (id: string) => void;
   onSave: () => void;
   onSaveConfirmedChange: (value: boolean) => void;
@@ -906,7 +985,7 @@ function ScanModal({
             <section className="card" style={{ marginBottom: "0.8rem" }}>
               <p style={{ marginTop: 0, fontWeight: 700, fontSize: "1.1rem" }}>Haz una foto de tu comida</p>
               <p className="muted">
-                Toma una foto o elige una imagen de tu galeria. Modo precision: Gemini detecta alimentos y gramos, y los
+                Toma una foto o elige una imagen de tu galería. Modo precisión: Gemini detecta alimentos y gramos, y los
                 macros se calculan con base nutricional.
               </p>
               <div className="scan-actions">
@@ -914,20 +993,39 @@ function ScanModal({
                   Tomar foto
                 </button>
                 <button type="button" className="btn secondary" onClick={() => galleryInputRef.current?.click()}>
-                  Elegir de galeria
+                  Elegir de galería
                 </button>
               </div>
             </section>
+
+            {imageDataUrl ? (
+              <section className="card" style={{ marginBottom: "0.8rem" }}>
+                <Image
+                  src={imageDataUrl}
+                  alt="Vista previa"
+                  className="result-image"
+                  width={1200}
+                  height={800}
+                  sizes="100vw"
+                  unoptimized
+                />
+              </section>
+            ) : null}
 
             {error ? (
               <section className="card" style={{ borderColor: "rgba(255,110,110,0.45)" }}>
                 <strong style={{ color: "#ff8f8f" }}>No se pudo detectar comida</strong>
                 <p className="muted" style={{ marginBottom: 0 }}>
-                  {error}
+                  {qualityGatePending && qualityGateMessage ? qualityGateMessage : error}
                 </p>
-                <div style={{ marginTop: "0.65rem" }}>
+                <div style={{ marginTop: "0.65rem", display: "flex", gap: "0.55rem", flexWrap: "wrap" }}>
+                  {qualityGatePending ? (
+                    <button type="button" className="btn primary" onClick={onAnalyzeDespiteQuality}>
+                      Analizar de todos modos
+                    </button>
+                  ) : null}
                   <button type="button" className="btn secondary" onClick={onRetryAnalyze}>
-                    Reintentar analisis
+                    Reintentar análisis
                   </button>
                 </div>
               </section>
@@ -956,7 +1054,7 @@ function ScanModal({
             <div className="pulse" />
             <h3 style={{ marginTop: 0 }}>Analizando tu comida...</h3>
             <p className="muted" style={{ marginBottom: 0 }}>
-              La IA esta identificando alimentos y calculando nutricion.
+              La IA está identificando alimentos y calculando nutrición.
             </p>
             {imageDataUrl ? (
               <Image
@@ -989,7 +1087,7 @@ function ScanModal({
 
             {warning ? (
               <section className="card" style={{ marginTop: "0.8rem", borderColor: "rgba(255,196,71,0.55)" }}>
-                <strong style={{ color: "var(--carbs)" }}>Nota del analisis</strong>
+                <strong style={{ color: "var(--carbs)" }}>Nota del análisis</strong>
                 <p className="muted" style={{ marginBottom: 0 }}>
                   {warning}
                 </p>
@@ -1079,6 +1177,7 @@ function ScanModal({
                   key={food.id}
                   food={food}
                   onUpdateGrams={(grams) => onUpdateGrams(food.id, grams)}
+                  onRename={(name) => onRenameFood(food.id, name)}
                   onDelete={() => onDeleteFood(food.id)}
                 />
               ))}
@@ -1087,7 +1186,7 @@ function ScanModal({
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.8rem" }}>
               {requiresSaveConfirmation ? (
                 <section className="card" style={{ gridColumn: "1 / -1", borderColor: "rgba(255,196,71,0.55)" }}>
-                  <strong style={{ color: "var(--carbs)" }}>Revision recomendada</strong>
+                  <strong style={{ color: "var(--carbs)" }}>Revisión recomendada</strong>
                   <p className="muted" style={{ marginBottom: "0.5rem" }}>
                     Hay alimentos con confianza baja. Revisa gramos y confirma antes de guardar.
                   </p>
@@ -1388,16 +1487,20 @@ function HealthProfileModal({
 function FoodResultRow({
   food,
   onUpdateGrams,
+  onRename,
   onDelete
 }: {
   food: DetectedFood;
   onUpdateGrams: (grams: number) => void;
+  onRename: (name: string) => void;
   onDelete: () => void;
 }) {
   const confidencePct = Math.round(food.confidence * 100);
   const confidenceColor = confidencePct >= 85 ? "var(--neon)" : confidencePct >= 65 ? "var(--carbs)" : "var(--fat)";
   const foodHealth = evaluateFoodHealthScore(food);
   const [gramsText, setGramsText] = useState(String(Math.round(food.estimatedGrams)));
+  const [editingName, setEditingName] = useState(false);
+  const [nameText, setNameText] = useState(food.name);
 
   function commitGrams(raw: string) {
     const value = Number(raw);
@@ -1409,13 +1512,66 @@ function FoodResultRow({
     setGramsText(String(Math.round(food.estimatedGrams)));
   }
 
+  function commitName(raw: string) {
+    const next = raw.trim();
+    if (!next) {
+      setNameText(food.name);
+      setEditingName(false);
+      return;
+    }
+    onRename(next);
+    setNameText(next);
+    setEditingName(false);
+  }
+
   return (
     <div className="food-row">
       <div style={{ width: 34, textAlign: "center" }}>{categoryEmoji(food.category)}</div>
       <div style={{ flex: 1 }}>
-        <p className="food-name">
-          {food.name} <span className={`food-grade food-grade-${foodHealth.grade.toLowerCase()}`}>{foodHealth.grade}</span>
-        </p>
+        {editingName ? (
+          <div style={{ display: "flex", gap: "0.35rem", alignItems: "center", marginBottom: "0.15rem" }}>
+            <input
+              type="text"
+              value={nameText}
+              onChange={(e) => setNameText(e.target.value)}
+              onBlur={(e) => commitName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitName(nameText);
+                }
+              }}
+              className="input-like"
+              style={{ padding: "0.3rem 0.5rem" }}
+            />
+            <button type="button" style={gramAdjustButtonStyle} onClick={() => commitName(nameText)}>
+              OK
+            </button>
+          </div>
+        ) : (
+          <p className="food-name" style={{ display: "flex", alignItems: "center", gap: "0.35rem", marginBottom: "0.12rem" }}>
+            <span>{food.name}</span>
+            <button
+              type="button"
+              style={{
+                border: "1px solid rgba(255,255,255,0.16)",
+                background: "rgba(255,255,255,0.04)",
+                color: "rgba(255,255,255,0.85)",
+                borderRadius: "0.45rem",
+                fontSize: "0.68rem",
+                padding: "0.1rem 0.35rem",
+                cursor: "pointer"
+              }}
+              onClick={() => {
+                setNameText(food.name);
+                setEditingName(true);
+              }}
+            >
+              Editar
+            </button>
+            <span className={`food-grade food-grade-${foodHealth.grade.toLowerCase()}`}>{foodHealth.grade}</span>
+          </p>
+        )}
         <p className="tiny muted" style={{ margin: 0 }}>
           <span className="kcal">{Math.round(food.nutrition.calories)} kcal</span> - P {Math.round(food.nutrition.protein)}g / C{" "}
           {Math.round(food.nutrition.carbs)}g / F {Math.round(food.nutrition.fat)}g
@@ -1539,7 +1695,8 @@ type VisionFoodPayload = GeminiFoodItem & {
 };
 
 function mapGeminiFoodToDetectedFood(food: VisionFoodPayload): DetectedFood | null {
-  const name = String(food.product_name ?? food.name ?? "").trim();
+  const detectedName = String(food.product_name ?? food.name ?? "").trim();
+  const name = resolveFoodAlias(detectedName) || detectedName;
   if (!name) return null;
 
   const rawGrams = clamp(food.grams, 0, 2000);
@@ -2110,6 +2267,7 @@ function sanitizePortionGrams(name: string, category: DetectedFood["category"], 
   if (containsAny(key, ["platano", "banana"])) return clamp(grams, 70, 220);
   if (containsAny(key, ["manzana", "apple"])) return clamp(grams, 90, 280);
   if (containsAny(key, ["naranja", "orange"])) return clamp(grams, 90, 320);
+  if (containsAny(key, ["mandarina", "mandarinas", "clementina", "clementinas", "tangerine"])) return clamp(grams, 60, 600);
   if (containsAny(key, ["huevo", "egg"])) return clamp(grams, 35, 120);
   if (containsAny(key, ["arroz", "rice"])) return clamp(grams, 50, 450);
   if (containsAny(key, ["pollo", "chicken"])) return clamp(grams, 60, 450);
@@ -2153,7 +2311,9 @@ function savePortionMemory(map: Record<string, number>): void {
 function applyPersonalPortionFactor(name: string, grams: number): number {
   const key = normalizeFoodKey(name);
   const memory = loadPortionMemory();
-  const factor = memory[key] ?? 1;
+  const explicitFactor = memory[key] ?? 1;
+  const historyFactor = estimateHistoryPortionFactor(key, grams);
+  const factor = clamp(explicitFactor * 0.7 + historyFactor * 0.3, 0.7, 1.35);
   return grams * factor;
 }
 
@@ -2166,6 +2326,74 @@ function rememberPortionAdjustment(name: string, fromGrams: number, toGrams: num
   const smoothed = clamp(current * 0.7 + newFactor * 0.3, 0.75, 1.25);
   memory[key] = smoothed;
   savePortionMemory(memory);
+}
+
+function estimateHistoryPortionFactor(foodKey: string, baseGrams: number): number {
+  if (typeof window === "undefined") return 1;
+  const meals = loadMeals();
+  if (!Array.isArray(meals) || meals.length === 0) return 1;
+
+  const recent = meals.slice(-120);
+  const grams: number[] = [];
+
+  for (const meal of recent) {
+    const items = meal.foods ?? [];
+    for (const item of items) {
+      if (normalizeFoodKey(item.name) !== foodKey) continue;
+      if (Number.isFinite(item.estimatedGrams) && item.estimatedGrams > 0) {
+        grams.push(item.estimatedGrams);
+      }
+    }
+  }
+
+  if (grams.length < 3) return 1;
+  const avg = grams.reduce((acc, v) => acc + v, 0) / grams.length;
+  const factor = avg / Math.max(baseGrams, 1);
+  return clamp(factor, 0.75, 1.3);
+}
+
+function loadFoodAliases(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(FOOD_ALIAS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const map: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "string" && value.trim()) {
+        map[key] = value.trim();
+      }
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+function saveFoodAliases(map: Record<string, string>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(FOOD_ALIAS_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage write errors and keep app usable.
+  }
+}
+
+function resolveFoodAlias(name: string): string {
+  const key = normalizeFoodKey(name);
+  const aliases = loadFoodAliases();
+  return aliases[key] ?? name;
+}
+
+function rememberFoodAlias(fromName: string, toName: string): void {
+  const fromKey = normalizeFoodKey(fromName);
+  const toValue = toTitleCase(toName.trim());
+  if (!fromKey || !toValue) return;
+  if (normalizeFoodKey(fromName) === normalizeFoodKey(toName)) return;
+
+  const aliases = loadFoodAliases();
+  aliases[fromKey] = toValue;
+  saveFoodAliases(aliases);
 }
 
 function evaluateFoodHealthScore(food: DetectedFood): { score: number; grade: "A" | "B" | "C" | "D" | "E"; reasons: string[] } {

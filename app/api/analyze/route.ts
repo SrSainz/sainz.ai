@@ -1,5 +1,6 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { GeminiFoodResponse } from "@/lib/types";
+import { hasKnownFoodMatch, lookupNutrition } from "@/lib/nutrition-db";
 
 export const runtime = "nodejs";
 const DEFAULT_MODEL_CHAIN = [
@@ -99,10 +100,6 @@ Identifica todos los alimentos visibles.
 Para cada alimento devuelve:
 - name (en espanol)
 - grams
-- calories
-- protein
-- carbs
-- fat
 - confidence (0-100)
 - is_packaged (true/false)
 - brand (si se ve marca)
@@ -115,10 +112,27 @@ Reglas importantes:
 - Si dudas de un alimento o porcion, baja confidence.
 - Prioriza precision de gramos: evita redondear todo a 100g.
 - Si hay un producto envasado, intenta leer texto de etiqueta y marca.
+- Frutas enteras (mandarina, naranja, platano, manzana, etc.) cuentan como comida valida y deben detectarse.
+- Si hay varias piezas iguales, puedes agruparlas en un solo item (ej: "Mandarina").
 - Si aparece una unica pieza de fruta (por ejemplo un platano), usa gramos realistas de una unidad (aprox. 90-160 g comestibles).
 - Si se ve al menos un alimento probable, devuelve al menos 1 item con confianza baja antes de responder foods vacio.
 - No inventes alimentos que no se ven.
-- Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.`;
+- Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.
+
+Formato obligatorio:
+{
+  "foods": [
+    {
+      "name": "",
+      "grams": 0,
+      "confidence": 0,
+      "is_packaged": false,
+      "brand": "",
+      "product_name": "",
+      "barcode": ""
+    }
+  ]
+}`;
 
 const retryPrompt = `Responde de nuevo con JSON ESTRICTO.
 
@@ -157,12 +171,51 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const body = (await req.json()) as { imageBase64?: string; mimeType?: string };
+    const body = (await req.json()) as { imageBase64?: string; mimeType?: string; barcodeHint?: string };
     const imageBase64 = (body.imageBase64 ?? "").trim();
     const mimeType = normalizeMimeType(body.mimeType);
+    const barcodeHint = cleanBarcode(String(body.barcodeHint ?? ""));
 
     if (!imageBase64) {
       return NextResponse.json({ error: "Missing imageBase64" }, { status: 400 });
+    }
+
+    // If we already have a readable barcode from camera, prefer exact product lookup.
+    if (barcodeHint.length >= 8) {
+      const product = await fetchOpenFoodFactsProduct({ type: "barcode", value: barcodeHint });
+      const nutrition100 = extractNutritionPer100(product?.nutriments);
+      if (product && nutrition100) {
+        const grams = clampNumber(parseQuantityToGrams(product.quantity ?? "") || 100, 20, 2000);
+        const productName = cleanFoodName(product.product_name_es || product.product_name || "Producto envasado");
+        const food: VisionFoodItem = {
+          name: productName,
+          product_name: productName,
+          brand: cleanFoodName(product.brands || ""),
+          barcode: barcodeHint,
+          grams,
+          calories: scalePer100(nutrition100.calories, grams),
+          protein: scalePer100(nutrition100.protein, grams),
+          carbs: scalePer100(nutrition100.carbs, grams),
+          fat: scalePer100(nutrition100.fat, grams),
+          confidence: 99,
+          is_packaged: true,
+          nutrition_source: "product"
+        };
+        const response: VisionFoodResponse = {
+          foods: [food],
+          total_calories: food.calories,
+          total_protein: food.protein,
+          total_carbs: food.carbs,
+          total_fat: food.fat
+        };
+        return NextResponse.json({
+          ...toPublicGeminiResponse(response),
+          source: "openfoodfacts",
+          model: "barcode",
+          warning: "Producto identificado por codigo de barras. Valores tomados de base externa.",
+          packagedEnriched: 1
+        });
+      }
     }
 
     let lastError = "Respuesta invalida del modelo.";
@@ -181,13 +234,14 @@ export async function POST(req: NextRequest) {
 
       const normalized = normalizeGeminiResponse(parsed.data);
       const enriched = await enrichPackagedFoodsWithOpenFoodFacts(normalized);
-      if (enriched.foods.length > 0) {
+      const nutrified = await enrichFoodsWithNutritionPipeline(enriched, apiKey);
+      if (nutrified.foods.length > 0) {
         return NextResponse.json({
-          ...toPublicGeminiResponse(enriched),
+          ...toPublicGeminiResponse(nutrified),
           source: "gemini",
           model: parsed.model,
-          warning: enriched.warning ?? undefined,
-          packagedEnriched: enriched.packagedEnriched
+          warning: nutrified.warning ?? undefined,
+          packagedEnriched: nutrified.packagedEnriched
         });
       }
       lastError = "No se detectaron alimentos.";
@@ -364,9 +418,23 @@ function coerceVisionFoodResponse(input: unknown): VisionFoodResponse | null {
       foodsRaw = directFoods;
     } else {
       const data = asRecord(root.data);
-      const nestedFoods = data ? pickArray(data, ["foods", "alimentos", "items", "food_items"]) : null;
-      if (nestedFoods) foodsRaw = nestedFoods;
+      const nestedFoods = data ? pickArray(data, ["foods", "alimentos", "items", "food_items", "detected_foods"]) : null;
+      if (nestedFoods) {
+        foodsRaw = nestedFoods;
+      } else {
+        const result = asRecord(root.result) ?? asRecord(root.output) ?? asRecord(root.response);
+        const resultFoods = result ? pickArray(result, ["foods", "alimentos", "items", "food_items", "detected_foods"]) : null;
+        if (resultFoods) {
+          foodsRaw = resultFoods;
+        }
+      }
     }
+  }
+
+  // Some models return a single food object at root instead of `foods: []`.
+  if (!foodsRaw.length && root) {
+    const singleton = coerceVisionFoodItem(root);
+    if (singleton) foodsRaw = [root];
   }
 
   const foods = foodsRaw.map((item) => coerceVisionFoodItem(item)).filter(Boolean) as VisionFoodItem[];
@@ -402,6 +470,25 @@ function coerceVisionFoodResponse(input: unknown): VisionFoodResponse | null {
 }
 
 function coerceVisionFoodItem(input: unknown): VisionFoodItem | null {
+  if (typeof input === "string") {
+    const rawName = cleanFoodName(input);
+    if (!rawName) return null;
+    return {
+      name: rawName,
+      grams: 100,
+      calories: 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0,
+      confidence: 60,
+      is_packaged: false,
+      brand: "",
+      product_name: "",
+      barcode: "",
+      nutrition_source: "ai"
+    };
+  }
+
   const row = asRecord(input);
   if (!row) return null;
 
@@ -551,6 +638,115 @@ async function enrichPackagedFoodsWithOpenFoodFacts(input: VisionFoodResponse): 
     total_fat: totals.fat,
     warning,
     packagedEnriched
+  };
+}
+
+async function enrichFoodsWithNutritionPipeline(
+  input: {
+    foods: VisionFoodItem[];
+    total_calories: number;
+    total_protein: number;
+    total_carbs: number;
+    total_fat: number;
+    warning?: string;
+    packagedEnriched: number;
+  },
+  apiKey: string
+): Promise<{
+  foods: VisionFoodItem[];
+  total_calories: number;
+  total_protein: number;
+  total_carbs: number;
+  total_fat: number;
+  warning?: string;
+  packagedEnriched: number;
+}> {
+  const foods = [...(input.foods ?? [])];
+  let estimatedByDb = 0;
+  let estimatedByGemini = 0;
+  let estimatedHeuristic = 0;
+  let geminiLookups = 0;
+  const maxGeminiLookups = 2;
+
+  for (let i = 0; i < foods.length; i += 1) {
+    const food = foods[i];
+    if (!food) continue;
+    if (hasMeaningfulNutrition(food)) continue;
+
+    const name = cleanFoodName(food.product_name || food.name);
+    const grams = clampNumber(food.grams, 20, 2000);
+
+    if (hasKnownFoodMatch(name)) {
+      const n = lookupNutrition(name, grams);
+      foods[i] = {
+        ...food,
+        calories: n.calories,
+        protein: n.protein,
+        carbs: n.carbs,
+        fat: n.fat,
+        confidence: Math.max(food.confidence, 78),
+        nutrition_source: food.nutrition_source === "product" ? "product" : "db"
+      };
+      estimatedByDb += 1;
+      continue;
+    }
+
+    if (geminiLookups < maxGeminiLookups) {
+      geminiLookups += 1;
+      const estimate = await estimateNutritionWithGemini(apiKey, name, grams);
+      if (estimate) {
+        foods[i] = {
+          ...food,
+          calories: estimate.calories,
+          protein: estimate.protein,
+          carbs: estimate.carbs,
+          fat: estimate.fat,
+          confidence: Math.max(food.confidence, estimate.confidence),
+          nutrition_source: "ai"
+        };
+        estimatedByGemini += 1;
+        continue;
+      }
+    }
+
+    const fallback = lookupNutrition(name, grams);
+    foods[i] = {
+      ...food,
+      calories: fallback.calories,
+      protein: fallback.protein,
+      carbs: fallback.carbs,
+      fat: fallback.fat,
+      confidence: Math.max(45, food.confidence - 10),
+      nutrition_source: "db"
+    };
+    estimatedHeuristic += 1;
+  }
+
+  const totals = foods.reduce(
+    (acc, food) => {
+      acc.calories += clampNumber(food.calories, 0, 5000);
+      acc.protein += clampNumber(food.protein, 0, 500);
+      acc.carbs += clampNumber(food.carbs, 0, 500);
+      acc.fat += clampNumber(food.fat, 0, 500);
+      return acc;
+    },
+    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+  );
+
+  const parts: string[] = [];
+  if (input.warning) parts.push(input.warning);
+  if (estimatedByDb > 0) parts.push(`Nutricion estimada por base local en ${estimatedByDb} alimento(s).`);
+  if (estimatedByGemini > 0) parts.push(`Nutricion estimada por IA en ${estimatedByGemini} alimento(s).`);
+  if (estimatedHeuristic > 0) parts.push(`Valores aproximados en ${estimatedHeuristic} alimento(s).`);
+
+  return {
+    foods,
+    total_calories: totals.calories,
+    total_protein: totals.protein,
+    total_carbs: totals.carbs,
+    total_fat: totals.fat,
+    warning: parts.length ? parts.join(" ") : undefined,
+    packagedEnriched: input.packagedEnriched
   };
 }
 
@@ -763,6 +959,78 @@ function toPublicGeminiResponse(input: VisionFoodResponse): GeminiFoodResponse &
   };
 }
 
+function hasMeaningfulNutrition(food: VisionFoodItem): boolean {
+  const calories = clampNumber(food.calories, 0, 5000);
+  const macros = clampNumber(food.protein, 0, 500) + clampNumber(food.carbs, 0, 500) + clampNumber(food.fat, 0, 500);
+  return calories > 0 && (macros > 0 || calories > 10);
+}
+
+async function estimateNutritionWithGemini(
+  apiKey: string,
+  name: string,
+  grams: number
+): Promise<{ calories: number; protein: number; carbs: number; fat: number; confidence: number } | null> {
+  const prompt = [
+    "Devuelve SOLO JSON valido sin markdown.",
+    "Estima nutricion para este alimento en gramos dados.",
+    `name: ${name}`,
+    `grams: ${Math.round(grams)}`,
+    "Formato:",
+    '{"calories":0,"protein":0,"carbs":0,"fat":0,"confidence":0}'
+  ].join("\n");
+
+  for (const model of getModelCandidates()) {
+    for (const apiVersion of API_VERSIONS) {
+      const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
+      const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          topP: 0.8,
+          maxOutputTokens: 180
+        }
+      };
+
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          url,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            cache: "no-store"
+          },
+          9_000
+        );
+      } catch {
+        continue;
+      }
+
+      if (!response.ok) continue;
+      const raw = await response.text();
+      const envelope = safeJsonParse<GeminiGenerateResponse>(raw);
+      if (!envelope) continue;
+      const text = collectGeminiText(envelope);
+      if (!text) continue;
+
+      const candidate = safeJsonParse<Record<string, unknown>>(extractJsonObject(text) ?? text);
+      if (!candidate) continue;
+
+      const calories = clampNumber(readNumberFromKeys(candidate, ["calories", "kcal", "energy_kcal"]), 0, 5000);
+      const protein = clampNumber(readNumberFromKeys(candidate, ["protein", "proteina"]), 0, 500);
+      const carbs = clampNumber(readNumberFromKeys(candidate, ["carbs", "carbohydrates", "carbohidratos"]), 0, 500);
+      const fat = clampNumber(readNumberFromKeys(candidate, ["fat", "grasas"]), 0, 500);
+      const confidence = clampNumber(readNumberFromKeys(candidate, ["confidence", "confianza", "score"]), 0, 100);
+
+      if (calories <= 0 && protein <= 0 && carbs <= 0 && fat <= 0) continue;
+      return { calories, protein, carbs, fat, confidence: Math.max(55, confidence) };
+    }
+  }
+
+  return null;
+}
+
 function collectGeminiText(envelope: GeminiGenerateResponse): string {
   const parts = envelope.candidates?.[0]?.content?.parts ?? [];
   return parts
@@ -926,8 +1194,14 @@ function readNumberFromKeys(source: Record<string, unknown>, keys: string[]): nu
     const value = source[key];
     if (value === null || value === undefined) continue;
     if (typeof value === "number" && Number.isFinite(value)) return value;
-    const parsed = Number(String(value).replace(",", "."));
+    const text = String(value).replace(",", ".").trim();
+    const parsed = Number(text);
     if (Number.isFinite(parsed)) return parsed;
+    const match = text.match(/-?\d+(?:\.\d+)?/);
+    if (match) {
+      const extracted = Number(match[0]);
+      if (Number.isFinite(extracted)) return extracted;
+    }
   }
   return 0;
 }

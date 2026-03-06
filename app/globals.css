@@ -8,6 +8,9 @@
   --protein: #6293ff;
   --carbs: #ffc447;
   --fat: #ff6e6e;
+  --card-shadow: 0 14px 38px rgba(0, 0, 0, 0.35);
+  --card-shadow-soft: 0 8px 22px rgba(0, 0, 0, 0.22);
+  --focus-ring: 0 0 0 2px rgba(166, 239, 89, 0.36);
 }
 
 * {
@@ -21,6 +24,8 @@ body {
   background: radial-gradient(80rem 80rem at 20% -10%, #16161d 0%, var(--bg) 52%);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -35,6 +40,15 @@ input {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0.75rem;
   padding: 0.65rem 0.8rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.input-like:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: rgba(166, 239, 89, 0.45);
+  box-shadow: var(--focus-ring);
 }
 
 .app-shell {
@@ -270,10 +284,12 @@ input {
 }
 
 .card {
-  background: linear-gradient(180deg, #1c1c23 0%, #17171d 100%);
+  background: linear-gradient(180deg, rgba(30, 30, 39, 0.96) 0%, rgba(23, 23, 30, 0.97) 100%);
   border: 1px solid var(--panel-border);
   border-radius: 1.5rem;
   padding: 1.2rem;
+  box-shadow: var(--card-shadow-soft);
+  backdrop-filter: blur(1.5px);
 }
 
 .macro-ring-wrap {
@@ -335,6 +351,11 @@ input {
   margin-bottom: 0.8rem;
 }
 
+.section-head strong,
+.section-head h2 {
+  letter-spacing: 0.01em;
+}
+
 .macro-row {
   margin-bottom: 0.75rem;
 }
@@ -368,6 +389,10 @@ input {
   gap: 0.8rem;
   align-items: center;
   padding: 0.65rem 0;
+}
+
+.food-row {
+  align-items: flex-start;
 }
 
 .meal-row-compact {
@@ -446,6 +471,7 @@ input {
   object-fit: cover;
   background: #2a2a33;
   flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .tabbar {
@@ -466,6 +492,7 @@ input {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 -14px 28px rgba(0, 0, 0, 0.35);
   display: grid;
   grid-template-columns: 1fr auto 1fr 1fr;
   align-items: center;
@@ -484,10 +511,15 @@ input {
   justify-items: center;
   cursor: pointer;
   min-width: 62px;
+  transition: color 0.2s ease, transform 0.2s ease;
 }
 
 .tab-btn.active {
   color: var(--neon);
+}
+
+.tab-btn:active {
+  transform: translateY(1px);
 }
 
 .scan-main-btn {
@@ -504,26 +536,47 @@ input {
   position: relative;
   z-index: 2;
   cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.22s ease, filter 0.2s ease;
+}
+
+.scan-main-btn:hover {
+  filter: brightness(1.02);
+}
+
+.scan-main-btn:active {
+  transform: translateY(-5px) scale(0.98);
+  box-shadow: 0 0 24px rgba(166, 239, 89, 0.35);
 }
 
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.74);
+  background: rgba(5, 6, 9, 0.76);
   display: grid;
   place-items: center;
   padding: 1rem;
   z-index: 30;
+  backdrop-filter: blur(2px);
 }
 
 .modal {
   width: min(500px, 100%);
   max-height: calc(100dvh - 2rem);
   overflow: auto;
-  background: #121217;
+  background: linear-gradient(180deg, #14141b 0%, #111117 100%);
   border: 1px solid var(--panel-border);
-  border-radius: 1.25rem;
+  border-radius: 1.4rem;
   padding: 1rem;
+  box-shadow: var(--card-shadow);
+}
+
+.modal::-webkit-scrollbar {
+  width: 8px;
+}
+
+.modal::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
 }
 
 .btn {
@@ -532,16 +585,28 @@ input {
   padding: 0.82rem 1rem;
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.22s ease, opacity 0.2s ease, border-color 0.2s ease;
+  touch-action: manipulation;
 }
 
 .btn.primary {
-  background: var(--neon);
+  background: linear-gradient(180deg, #b7f975 0%, var(--neon) 100%);
   color: #0f0f10;
+  box-shadow: 0 8px 18px rgba(166, 239, 89, 0.24);
 }
 
 .btn.secondary {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   color: var(--text);
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn:active {
+  transform: translateY(0);
 }
 
 .btn:disabled {
@@ -552,6 +617,7 @@ input {
 .scan-actions {
   display: grid;
   gap: 0.7rem;
+  grid-template-columns: 1fr 1fr;
 }
 
 .hidden-input {
@@ -563,6 +629,8 @@ input {
   height: 220px;
   border-radius: 1rem;
   object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.28);
 }
 
 .badge {
@@ -570,6 +638,10 @@ input {
   padding: 0.15rem 0.45rem;
   border-radius: 999px;
   font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
 }
 
 .history-day {
@@ -635,6 +707,10 @@ input {
     width: 58px;
     height: 58px;
     transform: translateY(-5px);
+  }
+
+  .scan-actions {
+    grid-template-columns: 1fr;
   }
 
   .meal-actions {
