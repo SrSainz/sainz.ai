@@ -75,6 +75,8 @@ export default function AppClient() {
   const [quotaRetryUntilMs, setQuotaRetryUntilMs] = useState<number | null>(null);
   const [quotaInfoMessage, setQuotaInfoMessage] = useState("");
   const [clockMs, setClockMs] = useState(() => Date.now());
+  const [lastImageBase64, setLastImageBase64] = useState("");
+  const [lastImageMimeType, setLastImageMimeType] = useState("image/jpeg");
 
   const [detailMeal, setDetailMeal] = useState<MealLog | null>(null);
 
@@ -120,6 +122,8 @@ export default function AppClient() {
     setIsSaving(false);
     setRequiresSaveConfirmation(false);
     setSaveConfirmed(true);
+    setLastImageBase64("");
+    setLastImageMimeType("image/jpeg");
   }
 
   function closeScan() {
@@ -133,6 +137,8 @@ export default function AppClient() {
     setIsSaving(false);
     setRequiresSaveConfirmation(false);
     setSaveConfirmed(true);
+    setLastImageBase64("");
+    setLastImageMimeType("image/jpeg");
   }
 
   async function onImagePicked(event: ChangeEvent<HTMLInputElement>) {
@@ -140,73 +146,90 @@ export default function AppClient() {
     if (!file) return;
     event.target.value = "";
 
-    setScanError("");
-    setScanWarning("");
-    setSaveError("");
-    setScanPhase("analyzing");
-
     try {
       const base64 = await compressImageToBase64(file, 1280, 1_500_000);
-      const mimeType = file.type?.startsWith("image/") ? file.type : "image/jpeg";
+      const mimeType = "image/jpeg";
       setSelectedImageDataUrl(`data:${mimeType};base64,${base64}`);
-
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageBase64: base64,
-          mimeType
-        })
-      });
-
-      const usageCount = registerApiUsageAttempt();
-      setApiUsageToday(usageCount);
-
-      if (!response.ok) {
-        const errorPayload = (await response.json().catch(() => null)) as AnalyzeErrorPayload | null;
-        const retryAfterSeconds =
-          typeof errorPayload?.retryAfterSeconds === "number" && errorPayload.retryAfterSeconds > 0
-            ? Math.ceil(errorPayload.retryAfterSeconds)
-            : null;
-        if (retryAfterSeconds) {
-          setQuotaRetryUntilMs(Date.now() + retryAfterSeconds * 1000);
-        } else {
-          setQuotaRetryUntilMs(null);
-        }
-        setQuotaExceeded(Boolean(errorPayload?.quotaExceeded));
-        setQuotaInfoMessage(buildQuotaInfoMessage(errorPayload));
-        throw new Error(errorPayload?.error || "Error al analizar la imagen.");
-      }
-
-      const payload = (await response.json()) as GeminiFoodResponse & {
-        warning?: string;
-        source?: string;
-        model?: string;
-      };
-      setQuotaExceeded(false);
-      setQuotaRetryUntilMs(null);
-      setQuotaInfoMessage("");
-      const rawFoods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
-      const foods = mergeSimilarFoods(rawFoods);
-
-      if (foods.length === 0) {
-        throw new Error("No se detectaron alimentos. Prueba con una foto mas clara.");
-      }
-
-      setDetectedFoods(foods);
-      const hasLowConfidence = foods.some((food) => food.confidence < LOW_CONFIDENCE_THRESHOLD);
-      setRequiresSaveConfirmation(hasLowConfidence);
-      setSaveConfirmed(!hasLowConfidence);
-      if (payload.warning) setScanWarning(payload.warning);
-      setAnalysisSource(payload.source || "gemini");
-      setAnalysisModel(payload.model || "");
-      setMealName(buildMealNameForCurrentTime(suggestMealName(foods), new Date()));
-      setScanPhase("result");
+      setLastImageBase64(base64);
+      setLastImageMimeType(mimeType);
+      await runAnalyze(base64, mimeType);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
       setScanError(message);
       setScanPhase("picker");
     }
+  }
+
+  async function retryLastAnalyze() {
+    if (!lastImageBase64) return;
+    setSelectedImageDataUrl(`data:${lastImageMimeType};base64,${lastImageBase64}`);
+    try {
+      await runAnalyze(lastImageBase64, lastImageMimeType);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
+      setScanError(message);
+      setScanPhase("picker");
+    }
+  }
+
+  async function runAnalyze(base64: string, mimeType: string) {
+    setScanError("");
+    setScanWarning("");
+    setSaveError("");
+    setScanPhase("analyzing");
+
+    const response = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imageBase64: base64,
+        mimeType
+      })
+    });
+
+    const usageCount = registerApiUsageAttempt();
+    setApiUsageToday(usageCount);
+
+    if (!response.ok) {
+      const errorPayload = (await response.json().catch(() => null)) as AnalyzeErrorPayload | null;
+      const retryAfterSeconds =
+        typeof errorPayload?.retryAfterSeconds === "number" && errorPayload.retryAfterSeconds > 0
+          ? Math.ceil(errorPayload.retryAfterSeconds)
+          : null;
+      if (retryAfterSeconds) {
+        setQuotaRetryUntilMs(Date.now() + retryAfterSeconds * 1000);
+      } else {
+        setQuotaRetryUntilMs(null);
+      }
+      setQuotaExceeded(Boolean(errorPayload?.quotaExceeded));
+      setQuotaInfoMessage(buildQuotaInfoMessage(errorPayload));
+      throw new Error(errorPayload?.error || "Error al analizar la imagen.");
+    }
+
+    const payload = (await response.json()) as GeminiFoodResponse & {
+      warning?: string;
+      source?: string;
+      model?: string;
+    };
+    setQuotaExceeded(false);
+    setQuotaRetryUntilMs(null);
+    setQuotaInfoMessage("");
+    const rawFoods = (payload.foods || []).map(mapGeminiFoodToDetectedFood).filter(Boolean) as DetectedFood[];
+    const foods = mergeSimilarFoods(rawFoods);
+
+    if (foods.length === 0) {
+      throw new Error("No se detectaron alimentos. Prueba con una foto mas clara.");
+    }
+
+    setDetectedFoods(foods);
+    const hasLowConfidence = foods.some((food) => food.confidence < LOW_CONFIDENCE_THRESHOLD);
+    setRequiresSaveConfirmation(hasLowConfidence);
+    setSaveConfirmed(!hasLowConfidence);
+    if (payload.warning) setScanWarning(payload.warning);
+    setAnalysisSource(payload.source || "gemini");
+    setAnalysisModel(payload.model || "");
+    setMealName(buildMealNameForCurrentTime(suggestMealName(foods), new Date()));
+    setScanPhase("result");
   }
 
   function updateFoodGrams(id: string, grams: number) {
@@ -389,6 +412,7 @@ export default function AppClient() {
           galleryInputRef={galleryInputRef}
           onClose={closeScan}
           onImagePicked={onImagePicked}
+          onRetryAnalyze={retryLastAnalyze}
           onMealNameChange={setMealName}
           onUpdateGrams={updateFoodGrams}
           onDeleteFood={removeFood}
@@ -405,6 +429,8 @@ export default function AppClient() {
             setMealName(mealPeriodLabel(new Date()));
             setRequiresSaveConfirmation(false);
             setSaveConfirmed(true);
+            setLastImageBase64("");
+            setLastImageMimeType("image/jpeg");
           }}
         />
       )}
@@ -790,6 +816,7 @@ function ScanModal({
   galleryInputRef,
   onClose,
   onImagePicked,
+  onRetryAnalyze,
   onMealNameChange,
   onUpdateGrams,
   onDeleteFood,
@@ -818,6 +845,7 @@ function ScanModal({
   galleryInputRef: React.RefObject<HTMLInputElement | null>;
   onClose: () => void;
   onImagePicked: (e: ChangeEvent<HTMLInputElement>) => Promise<void>;
+  onRetryAnalyze: () => Promise<void>;
   onMealNameChange: (name: string) => void;
   onUpdateGrams: (id: string, grams: number) => void;
   onDeleteFood: (id: string) => void;
@@ -888,6 +916,11 @@ function ScanModal({
                 <p className="muted" style={{ marginBottom: 0 }}>
                   {error}
                 </p>
+                <div style={{ marginTop: "0.65rem" }}>
+                  <button type="button" className="btn secondary" onClick={onRetryAnalyze}>
+                    Reintentar analisis
+                  </button>
+                </div>
               </section>
             ) : null}
 

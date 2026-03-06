@@ -1,8 +1,33 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { GeminiFoodResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
-const DEFAULT_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-lite"];
+const DEFAULT_MODEL_CHAIN = [
+  "gemini-2.5-pro",
+  "gemini-2.5-pro-latest",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash-latest",
+  "gemini-1.5-flash"
+];
+const API_VERSIONS = ["v1", "v1beta"] as const;
+const GEMINI_TIMEOUT_MS = 16_000;
+const OFF_TIMEOUT_MS = 5_000;
+const MODEL_BACKOFF_DEFAULT_MS = 2 * 60 * 1000;
+const MODEL_BACKOFF_UNSUPPORTED_MS = 12 * 60 * 60 * 1000;
+const MODEL_BACKOFF_TIMEOUT_MS = 90 * 1000;
+const modelBackoffUntil = new Map<string, number>();
+const MODEL_PRIORITY_HINTS: Array<{ token: string; score: number }> = [
+  { token: "2.5-pro", score: 1200 },
+  { token: "2.0-pro", score: 1120 },
+  { token: "2.5-flash", score: 1000 },
+  { token: "2.0-flash", score: 920 },
+  { token: "1.5-flash", score: 830 },
+  { token: "flash-lite", score: 740 },
+  { token: "lite", score: 700 }
+];
 const ENV_MODEL_CHAIN = (process.env.GEMINI_MODEL_PREFERENCE ?? "")
   .split(",")
   .map((m) => m.trim())
@@ -91,6 +116,7 @@ Reglas importantes:
 - Prioriza precision de gramos: evita redondear todo a 100g.
 - Si hay un producto envasado, intenta leer texto de etiqueta y marca.
 - Si aparece una unica pieza de fruta (por ejemplo un platano), usa gramos realistas de una unidad (aprox. 90-160 g comestibles).
+- Si se ve al menos un alimento probable, devuelve al menos 1 item con confianza baja antes de responder foods vacio.
 - No inventes alimentos que no se ven.
 - Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.`;
 
@@ -133,7 +159,7 @@ export async function POST(req: NextRequest) {
 
     const body = (await req.json()) as { imageBase64?: string; mimeType?: string };
     const imageBase64 = (body.imageBase64 ?? "").trim();
-    const mimeType = (body.mimeType ?? "image/jpeg").trim() || "image/jpeg";
+    const mimeType = normalizeMimeType(body.mimeType);
 
     if (!imageBase64) {
       return NextResponse.json({ error: "Missing imageBase64" }, { status: 400 });
@@ -197,65 +223,101 @@ async function callGemini(input: {
   let lastCallError: GeminiCallError | null = null;
 
   for (const model of getModelCandidates()) {
-    const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(model)}:generateContent?key=${input.apiKey}`;
-    const payload = {
-      contents: [
-        {
-          parts: [
-            { text: input.prompt },
-            {
-              inline_data: {
-                mime_type: input.mimeType,
-                data: input.imageBase64
+    for (const apiVersion of API_VERSIONS) {
+      const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${encodeURIComponent(model)}:generateContent?key=${input.apiKey}`;
+      const payload = {
+        contents: [
+          {
+            parts: [
+              { text: input.prompt },
+              {
+                inline_data: {
+                  mime_type: input.mimeType,
+                  data: input.imageBase64
+                }
               }
-            }
-          ]
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          topP: 0.9,
+          maxOutputTokens: 900
         }
-      ],
-      generationConfig: {
-        temperature: 0.1,
-        topP: 0.9,
-        maxOutputTokens: 900
-      }
-    };
+      };
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      cache: "no-store"
-    });
-
-    const rawText = await response.text();
-    if (!response.ok) {
-      const parsedError = parseGeminiApiError(rawText, response.status, model);
-      lastError = parsedError.error;
-      lastCallError = parsedError;
-      if (parsedError.quotaExceeded || shouldTryNextModel(parsedError.error, response.status)) {
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          url,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            cache: "no-store"
+          },
+          timeoutForModel(model)
+        );
+      } catch (error) {
+        const isTimeout = error instanceof Error && error.name === "AbortError";
+        lastError = isTimeout ? "Timeout al contactar con Gemini." : "Error de red al contactar con Gemini.";
+        lastCallError = {
+          ok: false,
+          error: lastError,
+          statusCode: 504,
+          quotaExceeded: false,
+          retryAfterSeconds: null,
+          quotaScopes: [],
+          model
+        };
+        setModelBackoff(model, MODEL_BACKOFF_TIMEOUT_MS);
         continue;
       }
-      return parsedError;
-    }
 
-    const envelope = safeJsonParse<GeminiGenerateResponse>(rawText);
-    if (!envelope) {
-      lastError = "Gemini devolvio un sobre JSON invalido.";
-      continue;
-    }
+      const rawText = await response.text();
+      if (!response.ok) {
+        const parsedError = parseGeminiApiError(rawText, response.status, model);
+        lastError = parsedError.error;
+        lastCallError = parsedError;
+        if (parsedError.quotaExceeded) {
+          const dailyQuota = parsedError.quotaScopes.includes("day");
+          const retryMs = dailyQuota
+            ? secondsUntilPacificMidnight(new Date()) * 1000
+            : parsedError.retryAfterSeconds
+              ? parsedError.retryAfterSeconds * 1000
+              : MODEL_BACKOFF_DEFAULT_MS;
+          setModelBackoff(model, retryMs);
+        } else if (shouldTryNextModel(parsedError.error, response.status)) {
+          setModelBackoff(model, MODEL_BACKOFF_UNSUPPORTED_MS);
+        } else {
+          setModelBackoff(model, MODEL_BACKOFF_DEFAULT_MS);
+        }
+        if (parsedError.quotaExceeded || shouldTryNextModel(parsedError.error, response.status)) {
+          continue;
+        }
+        return parsedError;
+      }
 
-    const contentText = envelope.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text?.trim();
-    if (!contentText) {
-      lastError = "Gemini no devolvio contenido de texto.";
-      continue;
-    }
+      const envelope = safeJsonParse<GeminiGenerateResponse>(rawText);
+      if (!envelope) {
+        lastError = "Gemini devolvio un sobre JSON invalido.";
+        continue;
+      }
 
-    const parsed = parseFoodJson(contentText);
-    if (!parsed) {
-      lastError = "Gemini devolvio texto no JSON.";
-      continue;
-    }
+      const contentText = collectGeminiText(envelope);
+      if (!contentText) {
+        lastError = "Gemini no devolvio contenido de texto.";
+        continue;
+      }
 
-    return { ok: true, data: parsed, model };
+      const parsed = parseFoodJson(contentText);
+      if (!parsed) {
+        lastError = "Gemini devolvio texto no JSON.";
+        continue;
+      }
+
+      return { ok: true, data: parsed, model };
+    }
   }
 
   return (
@@ -277,15 +339,102 @@ function parseFoodJson(raw: string): VisionFoodResponse | null {
     .replaceAll("```", "")
     .trim();
 
-  const candidates = [raw, cleaned, extractJsonObject(cleaned)].filter(Boolean) as string[];
+  const candidates = [raw, cleaned, extractJsonObject(cleaned), extractJsonArray(cleaned)].filter(Boolean) as string[];
 
   for (const candidate of candidates) {
-    const parsed = safeJsonParse<VisionFoodResponse>(candidate);
-    if (parsed && Array.isArray(parsed.foods)) {
-      return parsed;
+    const parsed = safeJsonParse<unknown>(candidate);
+    if (!parsed) continue;
+    const coerced = coerceVisionFoodResponse(parsed);
+    if (coerced) {
+      return coerced;
     }
   }
   return null;
+}
+
+function coerceVisionFoodResponse(input: unknown): VisionFoodResponse | null {
+  const root = asRecord(input);
+
+  let foodsRaw: unknown[] = [];
+  if (Array.isArray(input)) {
+    foodsRaw = input;
+  } else if (root) {
+    const directFoods = pickArray(root, ["foods", "alimentos", "items", "food_items"]);
+    if (directFoods) {
+      foodsRaw = directFoods;
+    } else {
+      const data = asRecord(root.data);
+      const nestedFoods = data ? pickArray(data, ["foods", "alimentos", "items", "food_items"]) : null;
+      if (nestedFoods) foodsRaw = nestedFoods;
+    }
+  }
+
+  const foods = foodsRaw.map((item) => coerceVisionFoodItem(item)).filter(Boolean) as VisionFoodItem[];
+  if (!foods.length) return null;
+
+  const totalsFromInput = root
+    ? {
+        calories: readNumberFromKeys(root, ["total_calories", "totalCalories", "calories_total", "kcal_total"]),
+        protein: readNumberFromKeys(root, ["total_protein", "totalProtein", "protein_total"]),
+        carbs: readNumberFromKeys(root, ["total_carbs", "totalCarbs", "carbs_total"]),
+        fat: readNumberFromKeys(root, ["total_fat", "totalFat", "fat_total"])
+      }
+    : null;
+
+  const sums = foods.reduce(
+    (acc, food) => {
+      acc.calories += clampNumber(food.calories, 0, 5000);
+      acc.protein += clampNumber(food.protein, 0, 500);
+      acc.carbs += clampNumber(food.carbs, 0, 500);
+      acc.fat += clampNumber(food.fat, 0, 500);
+      return acc;
+    },
+    { calories: 0, protein: 0, carbs: 0, fat: 0 }
+  );
+
+  return {
+    foods,
+    total_calories: fallbackNumber(totalsFromInput?.calories, sums.calories),
+    total_protein: fallbackNumber(totalsFromInput?.protein, sums.protein),
+    total_carbs: fallbackNumber(totalsFromInput?.carbs, sums.carbs),
+    total_fat: fallbackNumber(totalsFromInput?.fat, sums.fat)
+  };
+}
+
+function coerceVisionFoodItem(input: unknown): VisionFoodItem | null {
+  const row = asRecord(input);
+  if (!row) return null;
+
+  const name = readStringFromKeys(row, ["name", "food", "item", "alimento", "product_name", "producto"]);
+  const productName = readStringFromKeys(row, ["product_name", "productName", "producto", "nombre_producto"]);
+  const brand = readStringFromKeys(row, ["brand", "marca"]);
+  const barcode = cleanBarcode(readStringFromKeys(row, ["barcode", "ean", "gtin", "codigo_barras"]));
+
+  const resolvedName = cleanFoodName(productName || name);
+  if (!resolvedName) return null;
+
+  const grams = readNumberFromKeys(row, ["grams", "gramos", "estimated_grams", "estimatedGrams", "weight_g", "weight"]);
+  const calories = readNumberFromKeys(row, ["calories", "kcal", "energy_kcal", "energia", "cal"]);
+  const protein = readNumberFromKeys(row, ["protein", "proteina", "proteins"]);
+  const carbs = readNumberFromKeys(row, ["carbs", "carbohydrates", "carbohidratos", "hidratos"]);
+  const fat = readNumberFromKeys(row, ["fat", "grasas", "lipidos"]);
+  const confidence = readNumberFromKeys(row, ["confidence", "score", "certeza", "confianza"]);
+  const isPackaged = readBooleanFromKeys(row, ["is_packaged", "isPackaged", "packaged", "envasado"]) || barcode.length >= 8;
+
+  return {
+    name: resolvedName,
+    grams: clampNumber(grams, 0, 2000),
+    calories: clampNumber(calories, 0, 5000),
+    protein: clampNumber(protein, 0, 500),
+    carbs: clampNumber(carbs, 0, 500),
+    fat: clampNumber(fat, 0, 500),
+    confidence: clampNumber(confidence || 60, 0, 100),
+    is_packaged: isPackaged,
+    brand: cleanFoodName(brand),
+    product_name: cleanFoodName(productName),
+    barcode,
+    nutrition_source: "ai"
+  };
 }
 
 function normalizeGeminiResponse(input: VisionFoodResponse): VisionFoodResponse {
@@ -411,10 +560,21 @@ function packagedLookupQuery(food: VisionFoodItem): { type: "barcode"; value: st
     return { type: "barcode", value: barcode };
   }
 
-  const byModel = Boolean(food.is_packaged) || looksLikePackagedName(food.name) || looksLikePackagedName(food.product_name ?? "");
-  if (!byModel) return null;
-  const text = `${food.brand ?? ""} ${food.product_name ?? food.name}`.trim();
-  if (!text) return null;
+  const brand = cleanFoodName(String(food.brand ?? ""));
+  const productName = cleanFoodName(String(food.product_name ?? ""));
+  const name = cleanFoodName(String(food.name ?? ""));
+
+  const hasStrongPackagedSignal =
+    Boolean(food.is_packaged) ||
+    barcode.length >= 8 ||
+    (brand.length >= 3 && !isGenericFoodWord(brand)) ||
+    (productName.length >= 6 && !isGenericFoodWord(productName)) ||
+    looksLikePackagedName(`${brand} ${productName || name}`);
+
+  if (!hasStrongPackagedSignal) return null;
+
+  const text = `${brand} ${productName || name}`.trim();
+  if (!text || text.length < 5) return null;
   return { type: "text", value: text };
 }
 
@@ -422,15 +582,17 @@ function looksLikePackagedName(name: string): boolean {
   const key = cleanFoodName(name).toLowerCase();
   if (!key) return false;
   return (
-    key.includes("zero") ||
-    key.includes("cola") ||
+    key.includes("coca cola") ||
+    key.includes("coca-cola") ||
+    key.includes("pepsi") ||
     key.includes("kellogg") ||
-    key.includes("cereal") ||
+    key.includes("oreo") ||
+    key.includes("nestle") ||
+    key.includes("danone") ||
     key.includes("monster") ||
     key.includes("red bull") ||
-    key.includes("yogur") ||
-    key.includes("galleta") ||
-    key.includes("snack")
+    key.includes("protein bar") ||
+    key.includes("barrita proteica")
   );
 }
 
@@ -440,7 +602,7 @@ async function fetchOpenFoodFactsProduct(
   try {
     if (query.type === "barcode") {
       const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(query.value)}.json`;
-      const response = await fetch(url, { cache: "no-store" });
+      const response = await fetchWithTimeout(url, { cache: "no-store" }, OFF_TIMEOUT_MS);
       if (!response.ok) return null;
       const parsed = (await response.json()) as { status?: number; product?: OpenFoodFactsProduct };
       if (parsed.status !== 1 || !parsed.product) return null;
@@ -454,15 +616,64 @@ async function fetchOpenFoodFactsProduct(
     searchUrl.searchParams.set("json", "1");
     searchUrl.searchParams.set("page_size", "5");
 
-    const response = await fetch(searchUrl.toString(), { cache: "no-store" });
+    const response = await fetchWithTimeout(searchUrl.toString(), { cache: "no-store" }, OFF_TIMEOUT_MS);
     if (!response.ok) return null;
     const parsed = (await response.json()) as { products?: OpenFoodFactsProduct[] };
     const products = Array.isArray(parsed.products) ? parsed.products : [];
-    const firstWithNutrition = products.find((p) => extractNutritionPer100(p.nutriments));
-    return firstWithNutrition ?? null;
+    const ranked = products
+      .map((p) => ({ product: p, score: openFoodFactsTextScore(query.value, p) }))
+      .filter((x) => extractNutritionPer100(x.product.nutriments))
+      .sort((a, b) => b.score - a.score);
+
+    const best = ranked[0];
+    if (!best) return null;
+    if (best.score < 0.45) return null;
+    return best.product;
   } catch {
     return null;
   }
+}
+
+function openFoodFactsTextScore(queryText: string, product: OpenFoodFactsProduct): number {
+  const qTokens = tokenizeLookupText(queryText);
+  const label = `${product.brands ?? ""} ${product.product_name_es ?? product.product_name ?? ""}`.trim();
+  const pTokens = tokenizeLookupText(label);
+  if (!qTokens.length || !pTokens.length) return 0;
+  const q = new Set(qTokens);
+  const p = new Set(pTokens);
+  const inter = [...q].filter((t) => p.has(t)).length;
+  const union = new Set([...q, ...p]).size || 1;
+  return inter / union;
+}
+
+function tokenizeLookupText(text: string): string[] {
+  return cleanFoodName(text)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3);
+}
+
+function isGenericFoodWord(text: string): boolean {
+  const t = cleanFoodName(text).toLowerCase();
+  if (!t) return true;
+  const generic = [
+    "comida",
+    "alimento",
+    "food",
+    "snack",
+    "drink",
+    "bebida",
+    "yogur",
+    "yogurt",
+    "cereal",
+    "galleta",
+    "sopa",
+    "ensalada"
+  ];
+  return generic.some((w) => t === w);
 }
 
 function extractNutritionPer100(nutriments: Record<string, unknown> | undefined): {
@@ -552,9 +763,25 @@ function toPublicGeminiResponse(input: VisionFoodResponse): GeminiFoodResponse &
   };
 }
 
+function collectGeminiText(envelope: GeminiGenerateResponse): string {
+  const parts = envelope.candidates?.[0]?.content?.parts ?? [];
+  return parts
+    .map((p) => String(p.text ?? "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 function extractJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
+  if (start < 0 || end < 0 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+function extractJsonArray(text: string): string | null {
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
   if (start < 0 || end < 0 || end <= start) return null;
   return text.slice(start, end + 1);
 }
@@ -664,6 +891,74 @@ function cleanBarcode(value: string): string {
   return String(value ?? "").replace(/\D/g, "").slice(0, 20);
 }
 
+function normalizeMimeType(value: unknown): string {
+  const raw = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!raw.startsWith("image/")) return "image/jpeg";
+  if (raw.includes("heic") || raw.includes("heif")) return "image/jpeg";
+  return raw;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function pickArray(source: Record<string, unknown>, keys: string[]): unknown[] | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+  }
+  return null;
+}
+
+function readStringFromKeys(source: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function readNumberFromKeys(source: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const value = source[key];
+    if (value === null || value === undefined) continue;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    const parsed = Number(String(value).replace(",", "."));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function readBooleanFromKeys(source: Record<string, unknown>, keys: string[]): boolean {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const lower = value.trim().toLowerCase();
+      if (["true", "1", "si", "si", "yes"].includes(lower)) return true;
+      if (["false", "0", "no"].includes(lower)) return false;
+    }
+    if (typeof value === "number") {
+      if (value === 1) return true;
+      if (value === 0) return false;
+    }
+  }
+  return false;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = GEMINI_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function shouldRetry(message: string): boolean {
   const check = message.toLowerCase();
   return (
@@ -677,11 +972,25 @@ function shouldRetry(message: string): boolean {
 }
 
 function getModelCandidates(): string[] {
-  const unique = new Set<string>();
-  [GEMINI_MODEL, ...MODEL_FALLBACKS].forEach((model) => {
-    if (model && model.trim()) unique.add(model.trim());
+  const now = Date.now();
+  const merged = [GEMINI_MODEL, ...MODEL_FALLBACKS]
+    .map((model) => model.trim())
+    .filter(Boolean);
+
+  const unique = [...new Set(merged)];
+  const forced = GEMINI_MODEL.trim();
+
+  const active = unique.filter((model) => {
+    const blockedUntil = modelBackoffUntil.get(model) ?? 0;
+    return blockedUntil <= now;
   });
-  return [...unique];
+  const pool = active.length > 0 ? active : unique;
+
+  const sorted = [...pool].sort((a, b) => modelScore(b) - modelScore(a));
+  const forcedAllowed = forced && ((modelBackoffUntil.get(forced) ?? 0) <= now || active.length === 0);
+  if (!forcedAllowed) return sorted;
+  if (!sorted.includes(forced)) return [forced, ...sorted];
+  return [forced, ...sorted.filter((m) => m !== forced)];
 }
 
 function shouldTryNextModel(message: string, status: number): boolean {
@@ -694,3 +1003,25 @@ function shouldTryNextModel(message: string, status: number): boolean {
     check.includes("is not found for api version")
   );
 }
+
+function modelScore(model: string): number {
+  const lower = model.toLowerCase();
+  const hint = MODEL_PRIORITY_HINTS.find((x) => lower.includes(x.token));
+  const base = hint?.score ?? 600;
+  const latestBoost = lower.includes("latest") ? 8 : 0;
+  return base + latestBoost;
+}
+
+function setModelBackoff(model: string, durationMs: number): void {
+  const safeMs = clampNumber(durationMs, 1_000, 24 * 60 * 60 * 1000);
+  modelBackoffUntil.set(model, Date.now() + safeMs);
+}
+
+function timeoutForModel(model: string): number {
+  const lower = model.toLowerCase();
+  if (lower.includes("pro")) return 24_000;
+  if (lower.includes("lite")) return 12_000;
+  return GEMINI_TIMEOUT_MS;
+}
+
+
