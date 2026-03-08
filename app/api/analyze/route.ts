@@ -825,8 +825,13 @@ async function fetchOpenFoodFactsProduct(
     const parsed = (await response.json()) as { products?: OpenFoodFactsProduct[] };
     const products = Array.isArray(parsed.products) ? parsed.products : [];
     const ranked = products
-      .map((p) => ({ product: p, score: openFoodFactsTextScore(query.value, p) }))
-      .filter((x) => extractNutritionPer100(x.product.nutriments))
+      .map((p) => ({
+        product: p,
+        score: openFoodFactsTextScore(query.value, p),
+        nutrition: extractNutritionPer100(p.nutriments)
+      }))
+      .filter((x) => x.nutrition)
+      .filter((x) => !isContradictoryProductForQuery(query.value, x.product, x.nutrition!))
       .sort((a, b) => b.score - a.score);
 
     const best = ranked[0];
@@ -855,6 +860,44 @@ function minOpenFoodFactsScore(queryText: string): number {
   if (tokens.length >= 4) return 0.58;
   if (tokens.length === 3) return 0.64;
   return 0.72;
+}
+
+function isContradictoryProductForQuery(
+  queryText: string,
+  product: OpenFoodFactsProduct,
+  nutrition: { calories: number; protein: number; carbs: number; fat: number }
+): boolean {
+  if (!queryRequiresZeroProfile(queryText)) return false;
+  const label = `${product.brands ?? ""} ${product.product_name_es ?? product.product_name ?? ""}`.trim();
+  const looksZero = labelLooksZero(label);
+  if (looksZero) return false;
+
+  // If user asks for a "zero/light/sugar free" product, discard clearly sugary matches.
+  return nutrition.calories > 8 || nutrition.carbs > 2;
+}
+
+function queryRequiresZeroProfile(queryText: string): boolean {
+  const normalized = cleanFoodName(queryText).toLowerCase();
+  return (
+    normalized.includes("zero") ||
+    normalized.includes("light") ||
+    normalized.includes("sin azucar") ||
+    normalized.includes("sin azúcar") ||
+    normalized.includes("sugar free") ||
+    normalized.includes("no sugar")
+  );
+}
+
+function labelLooksZero(text: string): boolean {
+  const normalized = cleanFoodName(text).toLowerCase();
+  return (
+    normalized.includes("zero") ||
+    normalized.includes("light") ||
+    normalized.includes("sin azucar") ||
+    normalized.includes("sin azúcar") ||
+    normalized.includes("sugar free") ||
+    normalized.includes("no sugar")
+  );
 }
 
 function tokenizeLookupText(text: string): string[] {

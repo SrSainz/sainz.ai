@@ -22,6 +22,8 @@ const foods: Record<string, FoodNutrition> = {
   pasta: { name: "Pasta", caloriesPer100g: 131, proteinPer100g: 5, carbsPer100g: 25, fatPer100g: 1.1, fiberPer100g: 1.8, category: "carb" },
   spaghetti: { name: "Spaghetti", caloriesPer100g: 131, proteinPer100g: 5, carbsPer100g: 25, fatPer100g: 1.1, fiberPer100g: 1.8, category: "carb" },
   bread: { name: "Bread", caloriesPer100g: 265, proteinPer100g: 9, carbsPer100g: 49, fatPer100g: 3.2, fiberPer100g: 2.7, category: "carb" },
+  pan: { name: "Pan", caloriesPer100g: 265, proteinPer100g: 9, carbsPer100g: 49, fatPer100g: 3.2, fiberPer100g: 2.7, category: "carb" },
+  "barra de pan": { name: "Barra de pan", caloriesPer100g: 265, proteinPer100g: 9, carbsPer100g: 49, fatPer100g: 3.2, fiberPer100g: 2.7, category: "carb" },
   potato: { name: "Potato", caloriesPer100g: 77, proteinPer100g: 2, carbsPer100g: 17, fatPer100g: 0.1, fiberPer100g: 2.2, category: "carb" },
   "sweet potato": { name: "Sweet Potato", caloriesPer100g: 86, proteinPer100g: 1.6, carbsPer100g: 20, fatPer100g: 0.1, fiberPer100g: 3, category: "carb" },
   oatmeal: { name: "Oatmeal", caloriesPer100g: 68, proteinPer100g: 2.4, carbsPer100g: 12, fatPer100g: 1.4, fiberPer100g: 1.7, category: "carb" },
@@ -77,7 +79,12 @@ const foods: Record<string, FoodNutrition> = {
   tomate: { name: "Tomate", caloriesPer100g: 18, proteinPer100g: 0.9, carbsPer100g: 3.9, fatPer100g: 0.2, fiberPer100g: 1.2, category: "vegetable" },
   lechuga: { name: "Lechuga", caloriesPer100g: 15, proteinPer100g: 1.4, carbsPer100g: 2.9, fatPer100g: 0.2, fiberPer100g: 1.3, category: "vegetable" },
   zanahoria: { name: "Zanahoria", caloriesPer100g: 41, proteinPer100g: 0.9, carbsPer100g: 10, fatPer100g: 0.2, fiberPer100g: 2.8, category: "vegetable" },
-  cola: { name: "Cola", caloriesPer100g: 41, proteinPer100g: 0, carbsPer100g: 11, fatPer100g: 0, fiberPer100g: 0, category: "beverage" }
+  cola: { name: "Cola", caloriesPer100g: 41, proteinPer100g: 0, carbsPer100g: 11, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  "coca cola zero": { name: "Coca Cola Zero", caloriesPer100g: 0.3, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  "coca-cola zero": { name: "Coca Cola Zero", caloriesPer100g: 0.3, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  "coke zero": { name: "Coke Zero", caloriesPer100g: 0.3, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  "cola zero": { name: "Cola Zero", caloriesPer100g: 0.3, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" },
+  "coca cola light": { name: "Coca Cola Light", caloriesPer100g: 0.3, proteinPer100g: 0, carbsPer100g: 0, fatPer100g: 0, fiberPer100g: 0, category: "beverage" }
 };
 
 export function lookupNutrition(name: string, grams: number): NutritionInfo {

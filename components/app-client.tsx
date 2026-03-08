@@ -1702,7 +1702,16 @@ function mapGeminiFoodToDetectedFood(food: VisionFoodPayload): DetectedFood | nu
   const detectedName = String(food.product_name ?? food.name ?? "").trim();
   const detectedBrand = String(food.brand ?? "").trim();
   const hasNutritionSignal = rawGrams > 0 || aiCalories > 0 || aiProtein > 0 || aiCarbs > 0 || aiFat > 0;
-  const fallbackName = hasNutritionSignal ? (isPackaged ? "Producto envasado" : "Alimento detectado") : "";
+  const fallbackName = hasNutritionSignal
+    ? suggestFallbackDetectedName({
+        isPackaged,
+        grams: rawGrams,
+        calories: aiCalories,
+        protein: aiProtein,
+        carbs: aiCarbs,
+        fat: aiFat
+      })
+    : "";
   const resolvedName = combineBrandName(detectedBrand, detectedName || fallbackName);
   const name = (isPackaged ? resolvedName : resolveFoodAlias(resolvedName)) || resolvedName;
   if (!name) return null;
@@ -2302,6 +2311,30 @@ function combineBrandName(brand: string, name: string): string {
   const lowerBrand = cleanBrand.toLowerCase();
   if (lowerName.includes(lowerBrand)) return cleanName;
   return `${cleanBrand} ${cleanName}`;
+}
+
+function suggestFallbackDetectedName(input: {
+  isPackaged: boolean;
+  grams: number;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+}): string {
+  if (input.isPackaged) return "Producto envasado";
+
+  const grams = Math.max(input.grams, 100);
+  const kcal100 = (input.calories * 100) / grams;
+  const protein100 = (input.protein * 100) / grams;
+  const carbs100 = (input.carbs * 100) / grams;
+  const fat100 = (input.fat * 100) / grams;
+
+  if (kcal100 <= 12 && carbs100 <= 2 && protein100 <= 2 && fat100 <= 1) return "Bebida";
+  if (carbs100 >= 35 && protein100 <= 13 && fat100 <= 10) return "Pan";
+  if (protein100 >= 12 && protein100 >= carbs100 && protein100 >= fat100) return "Proteina";
+  if (fat100 >= 18 && fat100 > carbs100) return "Grasa saludable";
+  if (carbs100 >= protein100 * 1.8) return "Carbohidrato";
+  return "Alimento detectado";
 }
 
 function containsAny(value: string, words: string[]): boolean {
