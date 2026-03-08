@@ -19,8 +19,14 @@ pnpm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+.vs/
 *.swp
 *~
+
+# Local data indexes / dumps
+data/raw/
+data/staged/
+data/index/
 
 # Swift / Xcode
 DerivedData/

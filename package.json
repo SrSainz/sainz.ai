@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "build:food-index": "python scripts/build_food_index.py"
   },
   "dependencies": {
     "next": "^16.1.6",

@@ -1,6 +1,7 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { GeminiFoodResponse } from "@/lib/types";
 import { hasKnownFoodMatch, lookupNutrition } from "@/lib/nutrition-db";
+import { lookupLocalProductByBarcode, lookupLocalProductByText } from "@/lib/local-food-index";
 
 export const runtime = "nodejs";
 const DEFAULT_MODEL_CHAIN = [
@@ -174,6 +175,39 @@ export async function POST(req: NextRequest) {
 
     // If we already have a readable barcode from camera, prefer exact product lookup.
     if (barcodeHint.length >= 8) {
+      const localByBarcode = lookupLocalProductByBarcode(barcodeHint);
+      if (localByBarcode) {
+        const grams = clampNumber(parseQuantityToGrams(localByBarcode.quantity) || 100, 20, 2000);
+        const food: VisionFoodItem = {
+          name: cleanFoodName(localByBarcode.name),
+          product_name: cleanFoodName(localByBarcode.name),
+          brand: cleanFoodName(localByBarcode.brand),
+          barcode: localByBarcode.barcode,
+          grams,
+          calories: scalePer100(localByBarcode.calories100, grams),
+          protein: scalePer100(localByBarcode.protein100, grams),
+          carbs: scalePer100(localByBarcode.carbs100, grams),
+          fat: scalePer100(localByBarcode.fat100, grams),
+          confidence: 99,
+          is_packaged: true,
+          nutrition_source: "product"
+        };
+        const response: VisionFoodResponse = {
+          foods: [food],
+          total_calories: food.calories,
+          total_protein: food.protein,
+          total_carbs: food.carbs,
+          total_fat: food.fat
+        };
+        return NextResponse.json({
+          ...toPublicGeminiResponse(response),
+          source: "local-index",
+          model: "barcode-local",
+          warning: "Producto identificado por indice local.",
+          packagedEnriched: 1
+        });
+      }
+
       const product = await fetchOpenFoodFactsProduct({ type: "barcode", value: barcodeHint });
       const nutrition100 = extractNutritionPer100(product?.nutriments);
       if (product && nutrition100) {
@@ -805,6 +839,14 @@ async function fetchOpenFoodFactsProduct(
 ): Promise<OpenFoodFactsProduct | null> {
   try {
     if (query.type === "barcode") {
+      const local = lookupLocalProductByBarcode(query.value);
+      if (local) return asOpenFoodFactsProduct(local);
+    } else {
+      const local = lookupLocalProductByText(query.value);
+      if (local) return asOpenFoodFactsProduct(local);
+    }
+
+    if (query.type === "barcode") {
       const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(query.value)}.json`;
       const response = await fetchWithTimeout(url, { cache: "no-store" }, OFF_TIMEOUT_MS);
       if (!response.ok) return null;
@@ -1032,6 +1074,29 @@ function formatOutputFoodName(food: VisionFoodItem): string {
   if (!food.is_packaged || !brand) return base || brand || "Alimento detectado";
   if (base.toLowerCase().includes(brand.toLowerCase())) return base;
   return cleanFoodName(`${brand} ${base}`);
+}
+
+function asOpenFoodFactsProduct(product: {
+  name: string;
+  brand: string;
+  quantity: string;
+  calories100: number;
+  protein100: number;
+  carbs100: number;
+  fat100: number;
+}): OpenFoodFactsProduct {
+  return {
+    product_name: cleanFoodName(product.name),
+    product_name_es: cleanFoodName(product.name),
+    brands: cleanFoodName(product.brand),
+    quantity: product.quantity,
+    nutriments: {
+      "energy-kcal_100g": clampNumber(product.calories100, 0, 900),
+      proteins_100g: clampNumber(product.protein100, 0, 100),
+      carbohydrates_100g: clampNumber(product.carbs100, 0, 100),
+      fat_100g: clampNumber(product.fat100, 0, 100)
+    }
+  };
 }
 
 function hasMeaningfulNutrition(food: VisionFoodItem): boolean {
