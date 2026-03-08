@@ -5,34 +5,25 @@ import { lookupLocalProductByBarcode, lookupLocalProductByText } from "@/lib/loc
 
 export const runtime = "nodejs";
 const DEFAULT_MODEL_CHAIN = [
-  "gemini-2.5-pro",
-  "gemini-2.5-pro-latest",
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-2.0-flash",
-  "gemini-2.0-flash-lite",
   "gemini-1.5-flash-latest",
-  "gemini-1.5-flash"
+  "gemini-1.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.5-pro-latest",
+  "gemini-2.0-flash-lite"
 ];
 const API_VERSIONS = ["v1", "v1beta"] as const;
 const GEMINI_TIMEOUT_MS = 16_000;
 const OFF_TIMEOUT_MS = 3_500;
 const REQUEST_BUDGET_MS = 26_000;
 const REQUEST_SOFT_DEADLINE_MARGIN_MS = 600;
-const MAX_MODELS_PER_REQUEST = 3;
+const MAX_MODELS_PER_REQUEST = 5;
 const MODEL_BACKOFF_DEFAULT_MS = 2 * 60 * 1000;
 const MODEL_BACKOFF_UNSUPPORTED_MS = 12 * 60 * 60 * 1000;
 const MODEL_BACKOFF_TIMEOUT_MS = 90 * 1000;
 const modelBackoffUntil = new Map<string, number>();
-const MODEL_PRIORITY_HINTS: Array<{ token: string; score: number }> = [
-  { token: "2.5-pro", score: 1200 },
-  { token: "2.0-pro", score: 1120 },
-  { token: "2.5-flash", score: 1000 },
-  { token: "2.0-flash", score: 920 },
-  { token: "1.5-flash", score: 830 },
-  { token: "flash-lite", score: 740 },
-  { token: "lite", score: 700 }
-];
 const ENV_MODEL_CHAIN = (process.env.GEMINI_MODEL_PREFERENCE ?? "")
   .split(",")
   .map((m) => m.trim())
@@ -1529,12 +1520,10 @@ function getModelCandidates(): string[] {
     return blockedUntil <= now;
   });
   const pool = active.length > 0 ? active : unique;
-
-  const sorted = [...pool].sort((a, b) => modelScore(b) - modelScore(a));
   const forcedAllowed = forced && ((modelBackoffUntil.get(forced) ?? 0) <= now || active.length === 0);
-  if (!forcedAllowed) return sorted;
-  if (!sorted.includes(forced)) return [forced, ...sorted];
-  return [forced, ...sorted.filter((m) => m !== forced)];
+  if (!forcedAllowed) return pool;
+  if (!pool.includes(forced)) return [forced, ...pool];
+  return [forced, ...pool.filter((m) => m !== forced)];
 }
 
 function shouldTryNextModel(message: string, status: number): boolean {
@@ -1546,14 +1535,6 @@ function shouldTryNextModel(message: string, status: number): boolean {
     check.includes("unknown model") ||
     check.includes("is not found for api version")
   );
-}
-
-function modelScore(model: string): number {
-  const lower = model.toLowerCase();
-  const hint = MODEL_PRIORITY_HINTS.find((x) => lower.includes(x.token));
-  const base = hint?.score ?? 600;
-  const latestBoost = lower.includes("latest") ? 8 : 0;
-  return base + latestBoost;
 }
 
 function setModelBackoff(model: string, durationMs: number): void {
