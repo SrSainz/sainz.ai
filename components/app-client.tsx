@@ -1698,24 +1698,27 @@ function mapGeminiFoodToDetectedFood(food: VisionFoodPayload): DetectedFood | nu
   const aiProtein = clamp(food.protein, 0, 500);
   const aiCarbs = clamp(food.carbs, 0, 500);
   const aiFat = clamp(food.fat, 0, 500);
+  const isPackaged = Boolean(food.is_packaged) || food.nutrition_source === "product";
   const detectedName = String(food.product_name ?? food.name ?? "").trim();
+  const detectedBrand = String(food.brand ?? "").trim();
   const hasNutritionSignal = rawGrams > 0 || aiCalories > 0 || aiProtein > 0 || aiCarbs > 0 || aiFat > 0;
-  const fallbackName = hasNutritionSignal ? (Boolean(food.is_packaged) ? "Producto detectado" : "Alimento detectado") : "";
-  const resolvedName = detectedName || fallbackName;
-  const name = resolveFoodAlias(resolvedName) || resolvedName;
+  const fallbackName = hasNutritionSignal ? (isPackaged ? "Producto envasado" : "Alimento detectado") : "";
+  const resolvedName = combineBrandName(detectedBrand, detectedName || fallbackName);
+  const name = (isPackaged ? resolvedName : resolveFoodAlias(resolvedName)) || resolvedName;
   if (!name) return null;
 
   let confidence = Math.min(clamp(food.confidence, 0, 100), 97) / 100;
   const knownCategory = categoryForFood(name);
   const category = knownCategory === "other" && isLikelyBeverageName(name) ? "beverage" : knownCategory;
-  const baseGrams = rawGrams > 0 ? rawGrams : 100;
-  const sanitizedGrams = sanitizePortionGrams(name, category, baseGrams);
-  const personalizedGrams = applyPersonalPortionFactor(name, sanitizedGrams);
-  const safeGrams = clamp(personalizedGrams, 20, 2000);
+  const baseGrams = rawGrams > 0 ? rawGrams : category === "beverage" ? 330 : 100;
+  const sanitizedGrams = isPackaged ? baseGrams : sanitizePortionGrams(name, category, baseGrams);
+  const personalizedGrams =
+    !isPackaged && category !== "beverage" ? applyPersonalPortionFactor(name, sanitizedGrams) : sanitizedGrams;
+  const safeGrams = clamp(personalizedGrams, category === "beverage" ? 30 : 20, 2000);
   const knownFood = hasKnownFoodMatch(name);
-  const isPackaged = Boolean(food.is_packaged) || food.nutrition_source === "product";
 
-  const aiAdjustedStrongly = safeGrams / Math.max(baseGrams, 1) > 1.5 || safeGrams / Math.max(baseGrams, 1) < 0.65;
+  const aiAdjustedStrongly =
+    !isPackaged && (safeGrams / Math.max(baseGrams, 1) > 1.5 || safeGrams / Math.max(baseGrams, 1) < 0.65);
   if (aiAdjustedStrongly) {
     confidence = Math.max(0.45, confidence - 0.08);
   }
@@ -2269,8 +2272,8 @@ function sanitizePortionGrams(name: string, category: DetectedFood["category"], 
       max = 120;
       break;
     case "beverage":
-      min = 50;
-      max = 700;
+      min = 30;
+      max = 2000;
       break;
     default:
       min = 20;
@@ -2287,6 +2290,18 @@ function sanitizePortionGrams(name: string, category: DetectedFood["category"], 
   if (containsAny(key, ["brocoli", "broccoli"])) return clamp(grams, 40, 300);
 
   return clamp(grams, min, max);
+}
+
+function combineBrandName(brand: string, name: string): string {
+  const cleanName = name.trim();
+  const cleanBrand = brand.trim().replace(/\s+/g, " ");
+  if (!cleanName) return cleanBrand;
+  if (!cleanBrand) return cleanName;
+
+  const lowerName = cleanName.toLowerCase();
+  const lowerBrand = cleanBrand.toLowerCase();
+  if (lowerName.includes(lowerBrand)) return cleanName;
+  return `${cleanBrand} ${cleanName}`;
 }
 
 function containsAny(value: string, words: string[]): boolean {

@@ -606,10 +606,11 @@ async function enrichPackagedFoodsWithOpenFoodFacts(input: VisionFoodResponse): 
     if (!nutrition100) continue;
 
     const grams = choosePackagedPortionGrams(current, product);
+    const displayName = formatPackagedDisplayName(product, current);
     foods[idx] = {
       ...current,
-      name: cleanFoodName(product.product_name_es || product.product_name || current.product_name || current.name),
-      product_name: cleanFoodName(product.product_name_es || product.product_name || current.product_name || current.name),
+      name: displayName,
+      product_name: displayName,
       brand: cleanFoodName(product.brands || current.brand || ""),
       grams,
       calories: scalePer100(nutrition100.calories, grams),
@@ -769,17 +770,15 @@ function packagedLookupQuery(food: VisionFoodItem): { type: "barcode"; value: st
   const productName = cleanFoodName(String(food.product_name ?? ""));
   const name = cleanFoodName(String(food.name ?? ""));
 
-  const hasStrongPackagedSignal =
-    Boolean(food.is_packaged) ||
-    barcode.length >= 8 ||
-    (brand.length >= 3 && !isGenericFoodWord(brand)) ||
-    (productName.length >= 6 && !isGenericFoodWord(productName)) ||
-    looksLikePackagedName(`${brand} ${productName || name}`);
+  const hasBrand = brand.length >= 3 && !isGenericFoodWord(brand);
+  const brandedHint = looksLikePackagedName(`${brand} ${productName || name}`);
+  const hasStrongPackagedSignal = Boolean(food.is_packaged) || hasBrand || brandedHint;
 
   if (!hasStrongPackagedSignal) return null;
 
   const text = `${brand} ${productName || name}`.trim();
   if (!text || text.length < 5) return null;
+  if (!hasBrand && !brandedHint && tokenizeLookupText(text).length < 2) return null;
   return { type: "text", value: text };
 }
 
@@ -832,7 +831,7 @@ async function fetchOpenFoodFactsProduct(
 
     const best = ranked[0];
     if (!best) return null;
-    if (best.score < 0.45) return null;
+    if (best.score < minOpenFoodFactsScore(query.value)) return null;
     return best.product;
   } catch {
     return null;
@@ -849,6 +848,13 @@ function openFoodFactsTextScore(queryText: string, product: OpenFoodFactsProduct
   const inter = [...q].filter((t) => p.has(t)).length;
   const union = new Set([...q, ...p]).size || 1;
   return inter / union;
+}
+
+function minOpenFoodFactsScore(queryText: string): number {
+  const tokens = tokenizeLookupText(queryText);
+  if (tokens.length >= 4) return 0.58;
+  if (tokens.length === 3) return 0.64;
+  return 0.72;
 }
 
 function tokenizeLookupText(text: string): string[] {
@@ -923,6 +929,15 @@ function choosePackagedPortionGrams(food: VisionFoodItem, product: OpenFoodFacts
   return 100;
 }
 
+function formatPackagedDisplayName(product: OpenFoodFactsProduct, fallback: VisionFoodItem): string {
+  const brand = cleanFoodName(product.brands || fallback.brand || "");
+  const baseName = cleanFoodName(product.product_name_es || product.product_name || fallback.product_name || fallback.name);
+  if (!brand) return baseName || cleanFoodName(fallback.name || "Producto envasado");
+  if (!baseName) return brand;
+  if (baseName.toLowerCase().includes(brand.toLowerCase())) return baseName;
+  return cleanFoodName(`${brand} ${baseName}`);
+}
+
 function parseQuantityToGrams(raw: string): number {
   const normalized = String(raw ?? "")
     .toLowerCase()
@@ -948,7 +963,7 @@ function scalePer100(valuePer100: number, grams: number): number {
 function toPublicGeminiResponse(input: VisionFoodResponse): GeminiFoodResponse & { foods: VisionFoodItem[] } {
   return {
     foods: input.foods.map((food) => ({
-      name: food.product_name || food.name,
+      name: formatOutputFoodName(food),
       grams: food.grams,
       calories: food.calories,
       protein: food.protein,
@@ -966,6 +981,14 @@ function toPublicGeminiResponse(input: VisionFoodResponse): GeminiFoodResponse &
     total_carbs: input.total_carbs,
     total_fat: input.total_fat
   };
+}
+
+function formatOutputFoodName(food: VisionFoodItem): string {
+  const base = cleanFoodName(food.product_name || food.name);
+  const brand = cleanFoodName(food.brand || "");
+  if (!food.is_packaged || !brand) return base || brand || "Alimento detectado";
+  if (base.toLowerCase().includes(brand.toLowerCase())) return base;
+  return cleanFoodName(`${brand} ${base}`);
 }
 
 function hasMeaningfulNutrition(food: VisionFoodItem): boolean {
