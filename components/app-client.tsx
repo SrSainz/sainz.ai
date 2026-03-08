@@ -36,8 +36,50 @@ const PROFILE_KEY = "sainzcal_health_profile_v1";
 const PORTION_MEMORY_KEY = "sainzcal_portion_memory_v1";
 const FOOD_ALIAS_KEY = "sainzcal_food_alias_v1";
 const API_USAGE_KEY = "sainzcal_gemini_api_usage_v1";
+const MODEL_USAGE_KEY = "sainzcal_gemini_model_usage_v1";
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
 const ANALYZE_TIMEOUT_MS = 30_000;
+const MODEL_MINUTE_WINDOW_MS = 60_000;
+
+type ModelQuotaHint = {
+  key: string;
+  label: string;
+  rpmLimit: number;
+  rpdLimit: number;
+  priority: number;
+  aliases: string[];
+};
+
+type ModelQuotaRow = {
+  key: string;
+  label: string;
+  rpmLimit: number;
+  rpdLimit: number;
+  rpmUsed: number;
+  rpdUsed: number;
+  rpmRemaining: number;
+  rpdRemaining: number;
+  status: "ok" | "warn" | "blocked";
+};
+
+const MODEL_QUOTA_HINTS: ModelQuotaHint[] = [
+  {
+    key: "gemini-2.5-flash",
+    label: "Gemini 2.5 Flash",
+    rpmLimit: 5,
+    rpdLimit: 20,
+    priority: 1,
+    aliases: ["gemini-2.5-flash", "gemini-2.5-flash-latest"]
+  },
+  {
+    key: "gemini-2.5-flash-lite",
+    label: "Gemini 2.5 Flash Lite",
+    rpmLimit: 10,
+    rpdLimit: 20,
+    priority: 2,
+    aliases: ["gemini-2.5-flash-lite"]
+  }
+];
 
 type Tab = "home" | "history" | "health";
 type ScanPhase = "picker" | "analyzing" | "result";
@@ -74,6 +116,7 @@ export default function AppClient() {
   const [profile, setProfile] = useState<HealthProfile | null>(null);
   const [showHealthProfile, setShowHealthProfile] = useState(false);
   const [apiUsageToday, setApiUsageToday] = useState(0);
+  const [modelQuotaRows, setModelQuotaRows] = useState<ModelQuotaRow[]>(() => buildModelQuotaRows(Date.now()));
   const [quotaExceeded, setQuotaExceeded] = useState(false);
   const [quotaRetryUntilMs, setQuotaRetryUntilMs] = useState<number | null>(null);
   const [quotaInfoMessage, setQuotaInfoMessage] = useState("");
@@ -94,6 +137,7 @@ export default function AppClient() {
     const parsedGoals = loadGoals();
     const storedProfile = loadHealthProfile();
     setApiUsageToday(getApiUsageCountTodayPacific());
+    setModelQuotaRows(buildModelQuotaRows(Date.now()));
     setProfile(storedProfile);
     if (storedProfile) {
       const recommended = buildGoalsFromProfile(storedProfile);
@@ -108,6 +152,11 @@ export default function AppClient() {
     const timer = window.setInterval(() => setClockMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!scanOpen) return;
+    setModelQuotaRows(buildModelQuotaRows(clockMs));
+  }, [scanOpen, clockMs]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -141,6 +190,7 @@ export default function AppClient() {
     setLastDetectedBarcode("");
     setQualityGatePending(false);
     setQualityGateMessage("");
+    setModelQuotaRows(buildModelQuotaRows(Date.now()));
   }
 
   function closeScan() {
@@ -252,6 +302,8 @@ export default function AppClient() {
 
     if (!response.ok) {
       const errorPayload = (await response.json().catch(() => null)) as AnalyzeErrorPayload | null;
+      registerModelUsageHit(errorPayload?.model);
+      setModelQuotaRows(buildModelQuotaRows(Date.now()));
       const retryAfterSeconds =
         typeof errorPayload?.retryAfterSeconds === "number" && errorPayload.retryAfterSeconds > 0
           ? Math.ceil(errorPayload.retryAfterSeconds)
@@ -271,6 +323,8 @@ export default function AppClient() {
       source?: string;
       model?: string;
     };
+    registerModelUsageHit(payload.model);
+    setModelQuotaRows(buildModelQuotaRows(Date.now()));
     setQuotaExceeded(false);
     setQuotaRetryUntilMs(null);
     setQuotaInfoMessage("");
@@ -488,6 +542,7 @@ export default function AppClient() {
           requiresSaveConfirmation={requiresSaveConfirmation}
           saveConfirmed={saveConfirmed}
           apiUsageToday={apiUsageToday}
+          modelQuotaRows={modelQuotaRows}
           apiResetLeftSeconds={apiResetLeftSeconds}
           quotaExceeded={quotaExceeded}
           quotaRetryLeftSeconds={quotaRetryLeftSeconds}
@@ -907,6 +962,7 @@ function ScanModal({
   requiresSaveConfirmation,
   saveConfirmed,
   apiUsageToday,
+  modelQuotaRows,
   apiResetLeftSeconds,
   quotaExceeded,
   quotaRetryLeftSeconds,
@@ -940,6 +996,7 @@ function ScanModal({
   requiresSaveConfirmation: boolean;
   saveConfirmed: boolean;
   apiUsageToday: number;
+  modelQuotaRows: ModelQuotaRow[];
   apiResetLeftSeconds: number;
   quotaExceeded: boolean;
   quotaRetryLeftSeconds: number;
@@ -998,6 +1055,26 @@ function ScanModal({
             <p className="muted tiny" style={{ margin: "0.35rem 0 0" }}>
               {quotaInfoMessage}
             </p>
+          ) : null}
+          {modelQuotaRows.length ? (
+            <div className="model-quota-list">
+              <p className="muted tiny" style={{ margin: "0.55rem 0 0.35rem" }}>
+                Cuota estimada local por modelo (RPM/RPD)
+              </p>
+              {modelQuotaRows.map((row) => (
+                <div key={row.key} className="model-quota-row">
+                  <div className="model-quota-header">
+                    <span className="tiny">{row.label}</span>
+                    <span className={`status-chip ${row.status === "blocked" ? "warn" : "ok"}`}>
+                      {row.rpmRemaining}/{row.rpmLimit} RPM · {row.rpdRemaining}/{row.rpdLimit} RPD
+                    </span>
+                  </div>
+                  <div className="muted tiny">
+                    uso {row.rpmUsed}/{row.rpmLimit} min · {row.rpdUsed}/{row.rpdLimit} dia
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : null}
         </section>
 
@@ -1941,6 +2018,133 @@ function saveApiUsageCounter(next: { dayKey: string; count: number }): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(API_USAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage write errors and keep app usable.
+  }
+}
+
+type ModelUsageCounter = {
+  dayKey: string;
+  models: Record<
+    string,
+    {
+      dayCount: number;
+      minuteHits: number[];
+    }
+  >;
+};
+
+function registerModelUsageHit(modelRaw: string | null | undefined): void {
+  if (typeof window === "undefined") return;
+  const key = resolveQuotaModelKey(modelRaw);
+  if (!key) return;
+
+  const now = Date.now();
+  const today = pacificDayKey(new Date(now));
+  const current = loadModelUsageCounter();
+  const next: ModelUsageCounter =
+    current.dayKey === today
+      ? current
+      : {
+          dayKey: today,
+          models: Object.fromEntries(
+            Object.entries(current.models).map(([modelKey, stats]) => [
+              modelKey,
+              {
+                dayCount: 0,
+                minuteHits: stats.minuteHits.filter((hit) => now - hit <= MODEL_MINUTE_WINDOW_MS)
+              }
+            ])
+          )
+        };
+
+  const existing = next.models[key] ?? { dayCount: 0, minuteHits: [] };
+  const minuteHits = existing.minuteHits.filter((hit) => now - hit <= MODEL_MINUTE_WINDOW_MS);
+  minuteHits.push(now);
+  next.models[key] = {
+    dayCount: existing.dayCount + 1,
+    minuteHits: minuteHits.slice(-120)
+  };
+  saveModelUsageCounter(next);
+}
+
+function buildModelQuotaRows(nowMs: number): ModelQuotaRow[] {
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const today = pacificDayKey(new Date(now));
+  const current = loadModelUsageCounter();
+  const sameDay = current.dayKey === today;
+
+  return [...MODEL_QUOTA_HINTS]
+    .sort((a, b) => a.priority - b.priority)
+    .map((hint) => {
+      const stats = current.models[hint.key] ?? { dayCount: 0, minuteHits: [] };
+      const rpmUsed = stats.minuteHits.filter((hit) => now - hit <= MODEL_MINUTE_WINDOW_MS).length;
+      const rpdUsed = sameDay ? stats.dayCount : 0;
+      const rpmRemaining = Math.max(0, hint.rpmLimit - rpmUsed);
+      const rpdRemaining = Math.max(0, hint.rpdLimit - rpdUsed);
+      const status: ModelQuotaRow["status"] =
+        rpmRemaining <= 0 || rpdRemaining <= 0 ? "blocked" : rpmRemaining <= 1 || rpdRemaining <= 2 ? "warn" : "ok";
+
+      return {
+        key: hint.key,
+        label: hint.label,
+        rpmLimit: hint.rpmLimit,
+        rpdLimit: hint.rpdLimit,
+        rpmUsed,
+        rpdUsed,
+        rpmRemaining,
+        rpdRemaining,
+        status
+      };
+    });
+}
+
+function resolveQuotaModelKey(modelRaw: string | null | undefined): string | null {
+  const model = String(modelRaw ?? "")
+    .toLowerCase()
+    .trim();
+  if (!model) return null;
+
+  for (const hint of MODEL_QUOTA_HINTS) {
+    if (hint.aliases.some((alias) => model === alias || model.includes(alias))) {
+      return hint.key;
+    }
+  }
+  return null;
+}
+
+function loadModelUsageCounter(): ModelUsageCounter {
+  if (typeof window === "undefined") return { dayKey: "", models: {} };
+  try {
+    const raw = window.localStorage.getItem(MODEL_USAGE_KEY);
+    if (!raw) return { dayKey: "", models: {} };
+    const parsed = JSON.parse(raw) as ModelUsageCounter;
+    if (!parsed || typeof parsed !== "object") return { dayKey: "", models: {} };
+
+    const dayKey = typeof parsed.dayKey === "string" ? parsed.dayKey : "";
+    const entries = parsed.models && typeof parsed.models === "object" ? parsed.models : {};
+    const models: ModelUsageCounter["models"] = {};
+    for (const [key, value] of Object.entries(entries)) {
+      const stats = value as { dayCount?: number; minuteHits?: number[] };
+      const minuteHits = Array.isArray(stats.minuteHits)
+        ? stats.minuteHits.filter((hit) => Number.isFinite(hit)).map((hit) => Number(hit))
+        : [];
+      models[key] = {
+        dayCount: clamp(stats.dayCount ?? 0, 0, 1_000_000),
+        minuteHits: minuteHits.slice(-240)
+      };
+    }
+
+    return { dayKey, models };
+  } catch {
+    return { dayKey: "", models: {} };
+  }
+}
+
+function saveModelUsageCounter(next: ModelUsageCounter): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MODEL_USAGE_KEY, JSON.stringify(next));
   } catch {
     // Ignore storage write errors and keep app usable.
   }
