@@ -403,6 +403,28 @@ select:focus-visible {
   align-items: flex-start;
 }
 
+.food-result-row {
+  align-items: flex-start;
+}
+
+.food-portion-controls {
+  flex-shrink: 0;
+  min-width: 172px;
+  text-align: right;
+}
+
+.food-portion-editor {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  justify-content: flex-end;
+}
+
+.food-portion-input {
+  width: 72px;
+  min-width: 0;
+}
+
 .meal-row-compact {
   padding-block: 0.55rem;
 }
@@ -769,6 +791,29 @@ select:focus-visible {
     grid-template-columns: 1fr;
     bottom: calc(-0.85rem - env(safe-area-inset-bottom, 0px));
     padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .food-result-row {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 0.35rem 0.8rem;
+  }
+
+  .food-portion-controls {
+    grid-column: 2;
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+    margin-top: 0.12rem;
+  }
+
+  .food-portion-editor {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .food-portion-input {
+    width: 64px;
   }
 
   .result-image {

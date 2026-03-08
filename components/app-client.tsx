@@ -1548,9 +1548,9 @@ function FoodResultRow({
   }
 
   return (
-    <div className="food-row">
+    <div className="food-row food-result-row">
       <div style={{ width: 34, textAlign: "center" }}>{categoryEmoji(food.category)}</div>
-      <div style={{ flex: 1 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
         {editingName ? (
           <div style={{ display: "flex", gap: "0.35rem", alignItems: "center", marginBottom: "0.15rem" }}>
             <input
@@ -1600,8 +1600,8 @@ function FoodResultRow({
           {Math.round(food.nutrition.carbs)}g / F {Math.round(food.nutrition.fat)}g
         </p>
       </div>
-      <div style={{ textAlign: "right" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+      <div className="food-portion-controls">
+        <div className="food-portion-editor">
           <button
             type="button"
             onClick={() => {
@@ -1619,8 +1619,8 @@ function FoodResultRow({
             value={gramsText}
             onChange={(e) => setGramsText(e.target.value)}
             onBlur={(e) => commitGrams(e.target.value)}
+            className="food-portion-input"
             style={{
-              width: 72,
               background: "#0f0f14",
               color: "white",
               border: "1px solid rgba(255,255,255,0.12)",
