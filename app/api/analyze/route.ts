@@ -16,7 +16,10 @@ const DEFAULT_MODEL_CHAIN = [
 ];
 const API_VERSIONS = ["v1", "v1beta"] as const;
 const GEMINI_TIMEOUT_MS = 16_000;
-const OFF_TIMEOUT_MS = 5_000;
+const OFF_TIMEOUT_MS = 3_500;
+const REQUEST_BUDGET_MS = 26_000;
+const REQUEST_SOFT_DEADLINE_MARGIN_MS = 600;
+const MAX_MODELS_PER_REQUEST = 3;
 const MODEL_BACKOFF_DEFAULT_MS = 2 * 60 * 1000;
 const MODEL_BACKOFF_UNSUPPORTED_MS = 12 * 60 * 60 * 1000;
 const MODEL_BACKOFF_TIMEOUT_MS = 90 * 1000;
@@ -113,6 +116,8 @@ Reglas importantes:
 - Si dudas de un alimento o porcion, baja confidence.
 - Prioriza precision de gramos: evita redondear todo a 100g.
 - Si hay un producto envasado, intenta leer texto de etiqueta y marca.
+- Si en una bebida se lee "Zero", "Sin azucar", "No Sugar" o "Light", incluyelo literalmente en name y product_name (ej: "Coca-Cola Zero").
+- Si pone "Zero/Sin azucar/No Sugar/Light", NO lo trates como refresco normal azucarado.
 - Frutas enteras (mandarina, naranja, platano, manzana, etc.) cuentan como comida valida y deben detectarse.
 - Si hay varias piezas iguales, puedes agruparlas en un solo item (ej: "Mandarina").
 - Si aparece una unica pieza de fruta (por ejemplo un platano), usa gramos realistas de una unidad (aprox. 90-160 g comestibles).
@@ -164,6 +169,7 @@ Usa nombres de alimentos en espanol y porciones realistas. Si es bebida, usa ml 
 
 export async function POST(req: NextRequest) {
   try {
+    const deadlineAt = Date.now() + REQUEST_BUDGET_MS;
     const body = (await req.json()) as { imageBase64?: string; mimeType?: string; barcodeHint?: string };
     const imageBase64 = (body.imageBase64 ?? "").trim();
     const mimeType = normalizeMimeType(body.mimeType);
@@ -208,7 +214,7 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      const product = await fetchOpenFoodFactsProduct({ type: "barcode", value: barcodeHint });
+      const product = await fetchOpenFoodFactsProduct({ type: "barcode", value: barcodeHint }, deadlineAt);
       const nutrition100 = extractNutritionPer100(product?.nutriments);
       if (product && nutrition100) {
         const grams = clampNumber(parseQuantityToGrams(product.quantity ?? "") || 100, 20, 2000);
@@ -263,10 +269,10 @@ export async function POST(req: NextRequest) {
 
     let lastError = "Respuesta invalida del modelo.";
     let lastCallError: GeminiCallError | null = null;
-    const maxRetries = 1;
+    const maxRetries = 0;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const prompt = attempt === 0 ? primaryPrompt : retryPrompt;
-      const parsed = await callGemini({ apiKey, imageBase64, mimeType, prompt });
+      const parsed = await callGemini({ apiKey, imageBase64, mimeType, prompt, deadlineAt });
       if (!parsed.ok) {
         lastError = parsed.error;
         lastCallError = parsed;
@@ -276,8 +282,8 @@ export async function POST(req: NextRequest) {
       }
 
       const normalized = normalizeGeminiResponse(parsed.data);
-      const enriched = await enrichPackagedFoodsWithOpenFoodFacts(normalized);
-      const nutrified = await enrichFoodsWithNutritionPipeline(enriched, apiKey);
+      const enriched = await enrichPackagedFoodsWithOpenFoodFacts(normalized, deadlineAt);
+      const nutrified = await enrichFoodsWithNutritionPipeline(enriched, apiKey, deadlineAt);
       if (nutrified.foods.length > 0) {
         return NextResponse.json({
           ...toPublicGeminiResponse(nutrified),
@@ -315,12 +321,16 @@ async function callGemini(input: {
   imageBase64: string;
   mimeType: string;
   prompt: string;
+  deadlineAt: number;
 }): Promise<{ ok: true; data: VisionFoodResponse; model: string } | GeminiCallError> {
   let lastError = "Gemini no devolvio respuesta valida.";
   let lastCallError: GeminiCallError | null = null;
+  const modelCandidates = getModelCandidates().slice(0, MAX_MODELS_PER_REQUEST);
 
-  for (const model of getModelCandidates()) {
+  for (const model of modelCandidates) {
+    if (isPastSoftDeadline(input.deadlineAt)) break;
     for (const apiVersion of API_VERSIONS) {
+      if (isPastSoftDeadline(input.deadlineAt)) break;
       const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${encodeURIComponent(model)}:generateContent?key=${input.apiKey}`;
       const payload = {
         contents: [
@@ -345,6 +355,11 @@ async function callGemini(input: {
 
       let response: Response;
       try {
+        const timeoutMs = computeBoundedTimeout(input.deadlineAt, timeoutForModel(model));
+        if (timeoutMs <= 0) {
+          lastError = "Tiempo agotado en el analisis.";
+          break;
+        }
         response = await fetchWithTimeout(
           url,
           {
@@ -353,7 +368,7 @@ async function callGemini(input: {
             body: JSON.stringify(payload),
             cache: "no-store"
           },
-          timeoutForModel(model)
+          timeoutMs
         );
       } catch (error) {
         const isTimeout = error instanceof Error && error.name === "AbortError";
@@ -425,7 +440,7 @@ async function callGemini(input: {
       quotaExceeded: false,
       retryAfterSeconds: null,
       quotaScopes: [],
-      model: getModelCandidates()[0] ?? GEMINI_MODEL
+      model: modelCandidates[0] ?? GEMINI_MODEL
     }
   );
 }
@@ -605,7 +620,7 @@ function normalizeGeminiResponse(input: VisionFoodResponse): VisionFoodResponse 
   };
 }
 
-async function enrichPackagedFoodsWithOpenFoodFacts(input: VisionFoodResponse): Promise<{
+async function enrichPackagedFoodsWithOpenFoodFacts(input: VisionFoodResponse, deadlineAt: number): Promise<{
   foods: VisionFoodItem[];
   total_calories: number;
   total_protein: number;
@@ -621,10 +636,11 @@ async function enrichPackagedFoodsWithOpenFoodFacts(input: VisionFoodResponse): 
 
   let packagedEnriched = 0;
   let packagedDetected = 0;
-  const maxLookups = 4;
+  const maxLookups = 2;
   let lookups = 0;
 
   for (let idx = 0; idx < foods.length; idx += 1) {
+    if (isPastSoftDeadline(deadlineAt)) break;
     if (lookups >= maxLookups) break;
     const current = foods[idx];
     const query = packagedLookupQuery(current);
@@ -633,7 +649,7 @@ async function enrichPackagedFoodsWithOpenFoodFacts(input: VisionFoodResponse): 
     packagedDetected += 1;
     lookups += 1;
 
-    const product = await fetchOpenFoodFactsProduct(query);
+    const product = await fetchOpenFoodFactsProduct(query, deadlineAt);
     if (!product) continue;
 
     const nutrition100 = extractNutritionPer100(product.nutriments);
@@ -695,7 +711,8 @@ async function enrichFoodsWithNutritionPipeline(
     warning?: string;
     packagedEnriched: number;
   },
-  apiKey: string
+  apiKey: string,
+  deadlineAt: number
 ): Promise<{
   foods: VisionFoodItem[];
   total_calories: number;
@@ -713,6 +730,7 @@ async function enrichFoodsWithNutritionPipeline(
   const maxGeminiLookups = 2;
 
   for (let i = 0; i < foods.length; i += 1) {
+    if (isPastSoftDeadline(deadlineAt)) break;
     const food = foods[i];
     if (!food) continue;
     if (hasMeaningfulNutrition(food)) continue;
@@ -735,9 +753,9 @@ async function enrichFoodsWithNutritionPipeline(
       continue;
     }
 
-    if (geminiLookups < maxGeminiLookups) {
+    if (geminiLookups < maxGeminiLookups && !isPastSoftDeadline(deadlineAt)) {
       geminiLookups += 1;
-      const estimate = await estimateNutritionWithGemini(apiKey, name, grams);
+      const estimate = await estimateNutritionWithGemini(apiKey, name, grams, deadlineAt);
       if (estimate) {
         foods[i] = {
           ...food,
@@ -764,6 +782,12 @@ async function enrichFoodsWithNutritionPipeline(
       nutrition_source: "db"
     };
     estimatedHeuristic += 1;
+  }
+
+  for (let i = 0; i < foods.length; i += 1) {
+    const current = foods[i];
+    if (!current) continue;
+    foods[i] = applyBeverageNutritionSafety(current);
   }
 
   const totals = foods.reduce(
@@ -835,7 +859,8 @@ function looksLikePackagedName(name: string): boolean {
 }
 
 async function fetchOpenFoodFactsProduct(
-  query: { type: "barcode"; value: string } | { type: "text"; value: string }
+  query: { type: "barcode"; value: string } | { type: "text"; value: string },
+  deadlineAt?: number
 ): Promise<OpenFoodFactsProduct | null> {
   try {
     if (query.type === "barcode") {
@@ -847,8 +872,10 @@ async function fetchOpenFoodFactsProduct(
     }
 
     if (query.type === "barcode") {
+      const timeoutMs = computeBoundedTimeout(deadlineAt, OFF_TIMEOUT_MS);
+      if (timeoutMs <= 0) return null;
       const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(query.value)}.json`;
-      const response = await fetchWithTimeout(url, { cache: "no-store" }, OFF_TIMEOUT_MS);
+      const response = await fetchWithTimeout(url, { cache: "no-store" }, timeoutMs);
       if (!response.ok) return null;
       const parsed = (await response.json()) as { status?: number; product?: OpenFoodFactsProduct };
       if (parsed.status !== 1 || !parsed.product) return null;
@@ -862,7 +889,9 @@ async function fetchOpenFoodFactsProduct(
     searchUrl.searchParams.set("json", "1");
     searchUrl.searchParams.set("page_size", "5");
 
-    const response = await fetchWithTimeout(searchUrl.toString(), { cache: "no-store" }, OFF_TIMEOUT_MS);
+    const timeoutMs = computeBoundedTimeout(deadlineAt, OFF_TIMEOUT_MS);
+    if (timeoutMs <= 0) return null;
+    const response = await fetchWithTimeout(searchUrl.toString(), { cache: "no-store" }, timeoutMs);
     if (!response.ok) return null;
     const parsed = (await response.json()) as { products?: OpenFoodFactsProduct[] };
     const products = Array.isArray(parsed.products) ? parsed.products : [];
@@ -1005,13 +1034,59 @@ function readNutriment(source: Record<string, unknown>, keys: string[]): number 
 }
 
 function choosePackagedPortionGrams(food: VisionFoodItem, product: OpenFoodFactsProduct): number {
-  const fromFood = clampNumber(food.grams, 0, 2000);
-  if (fromFood > 0) return fromFood;
+  const aiGrams = clampNumber(food.grams, 0, 2000);
+  const quantity = clampNumber(parseQuantityToGrams(product.quantity ?? ""), 0, 2000);
+  const beverage = isLikelyBeverageItem(food);
 
-  const quantity = parseQuantityToGrams(product.quantity ?? "");
-  if (quantity > 0) return clampNumber(quantity, 20, 2000);
+  if (quantity > 0) {
+    if (aiGrams <= 0) return clampNumber(quantity, beverage ? 30 : 20, 2000);
+    const ratio = aiGrams / Math.max(quantity, 1);
+    if (ratio < 0.45 || ratio > 1.8) {
+      return clampNumber(quantity, beverage ? 30 : 20, 2000);
+    }
+    return clampNumber(aiGrams, beverage ? 30 : 20, 2000);
+  }
 
-  return 100;
+  if (aiGrams > 0) {
+    if (beverage && aiGrams > 750) {
+      return 500;
+    }
+    return clampNumber(aiGrams, beverage ? 30 : 20, 2000);
+  }
+
+  return beverage ? 330 : 100;
+}
+
+function applyBeverageNutritionSafety(food: VisionFoodItem): VisionFoodItem {
+  if (!isLikelyBeverageItem(food)) return food;
+
+  const grams = clampNumber(food.grams, 30, 2000);
+  const caloriesPer100 = (clampNumber(food.calories, 0, 5000) * 100) / Math.max(grams, 1);
+  const carbsPer100 = (clampNumber(food.carbs, 0, 500) * 100) / Math.max(grams, 1);
+  const label = `${food.brand ?? ""} ${food.product_name ?? ""} ${food.name ?? ""}`.trim().toLowerCase();
+  const zeroProfile = labelLooksZero(label);
+  const mentionsSugarText = label.includes("sugar") || label.includes("azucar") || label.includes("azúcar");
+  const ambiguousCola =
+    isLikelyColaLabel(label) &&
+    mentionsSugarText &&
+    !mentionsRegularSugar(label) &&
+    !food.barcode &&
+    caloriesPer100 > 30 &&
+    carbsPer100 > 6;
+
+  if (!zeroProfile && !ambiguousCola) return food;
+
+  const fallback = lookupNutrition(isLikelyColaLabel(label) ? "coca cola zero" : food.name, grams);
+  const confidenceBoost = food.confidence < 60 ? 60 : food.confidence;
+  return {
+    ...food,
+    calories: fallback.calories,
+    protein: fallback.protein,
+    carbs: fallback.carbs,
+    fat: fallback.fat,
+    confidence: confidenceBoost,
+    nutrition_source: food.nutrition_source === "product" && !ambiguousCola ? "product" : "db"
+  };
 }
 
 function formatPackagedDisplayName(product: OpenFoodFactsProduct, fallback: VisionFoodItem): string {
@@ -1076,6 +1151,45 @@ function formatOutputFoodName(food: VisionFoodItem): string {
   return cleanFoodName(`${brand} ${base}`);
 }
 
+function isLikelyBeverageItem(food: Pick<VisionFoodItem, "name" | "product_name" | "brand">): boolean {
+  const text = `${food.brand ?? ""} ${food.product_name ?? ""} ${food.name ?? ""}`
+    .toLowerCase()
+    .trim();
+  if (!text) return false;
+  return (
+    text.includes("coca") ||
+    text.includes("cola") ||
+    text.includes("refresco") ||
+    text.includes("soda") ||
+    text.includes("drink") ||
+    text.includes("bebida") ||
+    text.includes("juice") ||
+    text.includes("zumo") ||
+    text.includes("cafe") ||
+    text.includes("coffee") ||
+    text.includes("agua") ||
+    text.includes("water")
+  );
+}
+
+function isLikelyColaLabel(text: string): boolean {
+  const label = String(text ?? "").toLowerCase();
+  return label.includes("coca cola") || label.includes("coca-cola") || label.includes("coke") || label.includes("cola");
+}
+
+function mentionsRegularSugar(text: string): boolean {
+  const label = String(text ?? "").toLowerCase();
+  return (
+    label.includes("original") ||
+    label.includes("classic") ||
+    label.includes("clasica") ||
+    label.includes("normal") ||
+    label.includes("regular") ||
+    label.includes("con azucar") ||
+    label.includes("con azúcar")
+  );
+}
+
 function asOpenFoodFactsProduct(product: {
   name: string;
   brand: string;
@@ -1108,7 +1222,8 @@ function hasMeaningfulNutrition(food: VisionFoodItem): boolean {
 async function estimateNutritionWithGemini(
   apiKey: string,
   name: string,
-  grams: number
+  grams: number,
+  deadlineAt: number
 ): Promise<{ calories: number; protein: number; carbs: number; fat: number; confidence: number } | null> {
   const prompt = [
     "Devuelve SOLO JSON valido sin markdown.",
@@ -1119,8 +1234,10 @@ async function estimateNutritionWithGemini(
     '{"calories":0,"protein":0,"carbs":0,"fat":0,"confidence":0}'
   ].join("\n");
 
-  for (const model of getModelCandidates()) {
+  for (const model of getModelCandidates().slice(0, 2)) {
+    if (isPastSoftDeadline(deadlineAt)) return null;
     for (const apiVersion of API_VERSIONS) {
+      if (isPastSoftDeadline(deadlineAt)) return null;
       const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
       const payload = {
         contents: [{ parts: [{ text: prompt }] }],
@@ -1133,6 +1250,8 @@ async function estimateNutritionWithGemini(
 
       let response: Response;
       try {
+        const timeoutMs = computeBoundedTimeout(deadlineAt, 7_500);
+        if (timeoutMs <= 0) return null;
         response = await fetchWithTimeout(
           url,
           {
@@ -1141,7 +1260,7 @@ async function estimateNutritionWithGemini(
             body: JSON.stringify(payload),
             cache: "no-store"
           },
-          9_000
+          timeoutMs
         );
       } catch {
         continue;
@@ -1361,6 +1480,17 @@ function readBooleanFromKeys(source: Record<string, unknown>, keys: string[]): b
     }
   }
   return false;
+}
+
+function isPastSoftDeadline(deadlineAt: number): boolean {
+  return Date.now() >= deadlineAt - REQUEST_SOFT_DEADLINE_MARGIN_MS;
+}
+
+function computeBoundedTimeout(deadlineAt: number | undefined, desiredMs: number): number {
+  if (!deadlineAt) return desiredMs;
+  const remaining = deadlineAt - Date.now() - REQUEST_SOFT_DEADLINE_MARGIN_MS;
+  if (remaining <= 0) return 0;
+  return Math.max(700, Math.min(desiredMs, remaining));
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = GEMINI_TIMEOUT_MS): Promise<Response> {

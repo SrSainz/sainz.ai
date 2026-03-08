@@ -37,6 +37,7 @@ const PORTION_MEMORY_KEY = "sainzcal_portion_memory_v1";
 const FOOD_ALIAS_KEY = "sainzcal_food_alias_v1";
 const API_USAGE_KEY = "sainzcal_gemini_api_usage_v1";
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
+const ANALYZE_TIMEOUT_MS = 30_000;
 
 type Tab = "home" | "history" | "health";
 type ScanPhase = "picker" | "analyzing" | "result";
@@ -107,6 +108,14 @@ export default function AppClient() {
     const timer = window.setInterval(() => setClockMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.body.classList.toggle("scan-open", scanOpen);
+    return () => {
+      document.body.classList.remove("scan-open");
+    };
+  }, [scanOpen]);
 
   const todayMeals = useMemo(() => meals.filter((meal) => isToday(meal.date)), [meals]);
   const todayNutrition = useMemo(() => sumMealsNutrition(todayMeals), [todayMeals]);
@@ -214,15 +223,29 @@ export default function AppClient() {
     setSaveError("");
     setScanPhase("analyzing");
 
-    const response = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        imageBase64: base64,
-        mimeType,
-        barcodeHint: barcodeHint || undefined
-      })
-    });
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), ANALYZE_TIMEOUT_MS);
+
+    let response: Response;
+    try {
+      response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          barcodeHint: barcodeHint || undefined
+        }),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("El analisis tardo demasiado. Reintenta con mejor luz o una foto mas cercana.");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
 
     const usageCount = registerApiUsageAttempt();
     setApiUsageToday(usageCount);
@@ -415,40 +438,42 @@ export default function AppClient() {
         ) : null}
       </main>
 
-      <nav className="tabbar">
-        <div className="tabbar-inner">
-          <button
-            className={`tab-btn ${tab === "home" ? "active" : ""}`}
-            type="button"
-            onClick={() => setTab("home")}
-          >
-            <span>{"\u{1F3E0}"}</span>
-            <span className="tiny">Inicio</span>
-          </button>
+      {!scanOpen && (
+        <nav className="tabbar">
+          <div className="tabbar-inner">
+            <button
+              className={`tab-btn ${tab === "home" ? "active" : ""}`}
+              type="button"
+              onClick={() => setTab("home")}
+            >
+              <span>{"\u{1F3E0}"}</span>
+              <span className="tiny">Inicio</span>
+            </button>
 
-          <button className="scan-main-btn" type="button" onClick={openScan} aria-label="Escanear comida">
-            {"\u{1F4F7}"}
-          </button>
+            <button className="scan-main-btn" type="button" onClick={openScan} aria-label="Escanear comida">
+              {"\u{1F4F7}"}
+            </button>
 
-          <button
-            className={`tab-btn ${tab === "history" ? "active" : ""}`}
-            type="button"
-            onClick={() => setTab("history")}
-          >
-            <span>{"\u{1F4CA}"}</span>
-            <span className="tiny">Historial</span>
-          </button>
+            <button
+              className={`tab-btn ${tab === "history" ? "active" : ""}`}
+              type="button"
+              onClick={() => setTab("history")}
+            >
+              <span>{"\u{1F4CA}"}</span>
+              <span className="tiny">Historial</span>
+            </button>
 
-          <button
-            className={`tab-btn ${tab === "health" ? "active" : ""}`}
-            type="button"
-            onClick={() => setTab("health")}
-          >
-            <span>{"\u{2764}\u{FE0F}"}</span>
-            <span className="tiny">Salud</span>
-          </button>
-        </div>
-      </nav>
+            <button
+              className={`tab-btn ${tab === "health" ? "active" : ""}`}
+              type="button"
+              onClick={() => setTab("health")}
+            >
+              <span>{"\u{2764}\u{FE0F}"}</span>
+              <span className="tiny">Salud</span>
+            </button>
+          </div>
+        </nav>
+      )}
 
       {scanOpen && (
         <ScanModal

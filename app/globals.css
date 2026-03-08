@@ -28,6 +28,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+body.scan-open {
+  overflow: hidden;
+}
+
+body.scan-open .tabbar {
+  display: none !important;
+}
+
 button,
 input {
   font: inherit;
@@ -555,14 +563,16 @@ select:focus-visible {
   display: grid;
   place-items: center;
   padding: 1rem;
-  z-index: 30;
+  z-index: 999;
   backdrop-filter: blur(2px);
 }
 
 .modal {
   width: min(500px, 100%);
   max-height: calc(100dvh - 2rem);
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
   background: linear-gradient(180deg, #14141b 0%, #111117 100%);
   border: 1px solid var(--panel-border);
   border-radius: 1.4rem;
@@ -586,6 +596,7 @@ select:focus-visible {
   margin-top: 0.8rem;
   position: sticky;
   bottom: -1rem;
+  z-index: 4;
   padding: 0.75rem 0 0.2rem;
   background: linear-gradient(180deg, rgba(17, 17, 23, 0) 0%, rgba(17, 17, 23, 0.9) 38%, rgba(17, 17, 23, 0.98) 100%);
 }
@@ -641,7 +652,16 @@ select:focus-visible {
 }
 
 .hidden-input {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  border: 0;
+  padding: 0;
+  white-space: nowrap;
+  clip-path: inset(50%);
+  clip: rect(0 0 0 0);
+  overflow: hidden;
 }
 
 .result-image {
@@ -723,7 +743,7 @@ select:focus-visible {
     width: 100%;
     max-height: 100dvh;
     border-radius: 1.15rem 1.15rem 0 0;
-    padding: 0.9rem 0.85rem calc(1rem + env(safe-area-inset-bottom, 0px));
+    padding: 0.9rem 0.85rem calc(1.45rem + env(safe-area-inset-bottom, 0px));
   }
 
   .tabbar-inner {
