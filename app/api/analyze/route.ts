@@ -99,7 +99,7 @@ Identifica todos los alimentos visibles.
 
 Para cada alimento devuelve:
 - name (en espanol)
-- grams
+- grams (si es bebida, usa volumen en ml y escribe ese numero en grams)
 - confidence (0-100)
 - is_packaged (true/false)
 - brand (si se ve marca)
@@ -115,7 +115,7 @@ Reglas importantes:
 - Frutas enteras (mandarina, naranja, platano, manzana, etc.) cuentan como comida valida y deben detectarse.
 - Si hay varias piezas iguales, puedes agruparlas en un solo item (ej: "Mandarina").
 - Si aparece una unica pieza de fruta (por ejemplo un platano), usa gramos realistas de una unidad (aprox. 90-160 g comestibles).
-- Si se ve al menos un alimento probable, devuelve al menos 1 item con confianza baja antes de responder foods vacio.
+- Si se ve al menos un alimento o bebida probable, devuelve al menos 1 item con confianza baja antes de responder foods vacio.
 - No inventes alimentos que no se ven.
 - Si no hay alimentos visibles, devuelve "foods": [] y totales en 0.
 
@@ -159,18 +159,10 @@ Debes devolver SOLO este objeto JSON, sin texto extra:
   "total_fat": 0
 }
 
-Usa nombres de alimentos en espanol y porciones realistas.`;
+Usa nombres de alimentos en espanol y porciones realistas. Si es bebida, usa ml y escribe ese valor en grams. Si hay indicios de comida/bebida, evita foods vacio y responde con baja confianza.`;
 
 export async function POST(req: NextRequest) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "Missing GEMINI_API_KEY environment variable." },
-        { status: 500 }
-      );
-    }
-
     const body = (await req.json()) as { imageBase64?: string; mimeType?: string; barcodeHint?: string };
     const imageBase64 = (body.imageBase64 ?? "").trim();
     const mimeType = normalizeMimeType(body.mimeType);
@@ -216,6 +208,23 @@ export async function POST(req: NextRequest) {
           packagedEnriched: 1
         });
       }
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    if (!apiKey) {
+      const dailyResetSeconds = secondsUntilPacificMidnight(new Date());
+      return NextResponse.json(
+        {
+          error: "Falta GEMINI_API_KEY. Configurala para analizar imagenes sin codigo de barras.",
+          quotaExceeded: false,
+          retryAfterSeconds: null,
+          quotaScopes: [],
+          model: null,
+          modelCandidates: getModelCandidates(),
+          dailyResetSeconds
+        },
+        { status: 503 }
+      );
     }
 
     let lastError = "Respuesta invalida del modelo.";
@@ -500,7 +509,7 @@ function coerceVisionFoodItem(input: unknown): VisionFoodItem | null {
   const resolvedName = cleanFoodName(productName || name);
   if (!resolvedName) return null;
 
-  const grams = readNumberFromKeys(row, ["grams", "gramos", "estimated_grams", "estimatedGrams", "weight_g", "weight"]);
+  const grams = readNumberFromKeys(row, ["grams", "gramos", "estimated_grams", "estimatedGrams", "weight_g", "weight", "ml", "volume_ml", "volumeMl"]);
   const calories = readNumberFromKeys(row, ["calories", "kcal", "energy_kcal", "energia", "cal"]);
   const protein = readNumberFromKeys(row, ["protein", "proteina", "proteins"]);
   const carbs = readNumberFromKeys(row, ["carbs", "carbohydrates", "carbohidratos", "hidratos"]);
@@ -1297,5 +1306,6 @@ function timeoutForModel(model: string): number {
   if (lower.includes("lite")) return 12_000;
   return GEMINI_TIMEOUT_MS;
 }
+
 
 

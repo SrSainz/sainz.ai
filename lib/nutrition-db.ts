@@ -122,21 +122,21 @@ export function hasKnownFoodMatch(name: string): boolean {
 export function categoryEmoji(category: FoodCategory): string {
   switch (category) {
     case "protein":
-      return "🥩";
+      return "\uD83E\uDD69";
     case "carb":
-      return "🍚";
+      return "\uD83C\uDF5A";
     case "vegetable":
-      return "🥦";
+      return "\uD83E\uDD66";
     case "fruit":
-      return "🍎";
+      return "\uD83C\uDF4E";
     case "dairy":
-      return "🥛";
+      return "\uD83E\uDD5B";
     case "fat":
-      return "🥑";
+      return "\uD83E\uDD51";
     case "beverage":
-      return "🥤";
+      return "\uD83E\uDD64";
     default:
-      return "🍽";
+      return "\uD83C\uDF7D";
   }
 }
 
@@ -159,3 +159,4 @@ function scaleNutrition(food: FoodNutrition, grams: number): NutritionInfo {
     fiber: food.fiberPer100g * factor
   };
 }
+

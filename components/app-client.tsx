@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Image from "next/image";
 import { ChangeEvent, CSSProperties, useEffect, useMemo, useRef, useState } from "react";
@@ -168,18 +168,13 @@ export default function AppClient() {
       setLastDetectedBarcode(barcode ?? "");
 
       const quality = await assessImageQuality(file);
-      if (!quality.ok) {
-        setQualityGatePending(true);
-        const warning = quality.warnings.length > 0 ? quality.warnings.join(" ") : "La imagen no tiene calidad suficiente.";
-        setQualityGateMessage(`Calidad baja (${quality.score}/100). ${warning}`);
-        setScanError(`Calidad baja (${quality.score}/100). ${warning}`);
-        setScanPhase("picker");
-        return;
-      }
+      const qualityWarning = !quality.ok
+        ? `Calidad baja (${quality.score}/100). ${quality.warnings.length > 0 ? quality.warnings.join(" ") : "La imagen puede estar borrosa u oscura."}`
+        : "";
 
-      setQualityGatePending(false);
-      setQualityGateMessage("");
-      await runAnalyze(base64, mimeType, barcode ?? "");
+      setQualityGatePending(!quality.ok);
+      setQualityGateMessage(qualityWarning);
+      await runAnalyze(base64, mimeType, barcode ?? "", qualityWarning);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al analizar la imagen.";
       setScanError(message);
@@ -213,9 +208,9 @@ export default function AppClient() {
     }
   }
 
-  async function runAnalyze(base64: string, mimeType: string, barcodeHint = "") {
+  async function runAnalyze(base64: string, mimeType: string, barcodeHint = "", preWarning = "") {
     setScanError("");
-    setScanWarning("");
+    setScanWarning(preWarning);
     setSaveError("");
     setScanPhase("analyzing");
 
@@ -260,14 +255,15 @@ export default function AppClient() {
     const foods = mergeSimilarFoods(rawFoods);
 
     if (foods.length === 0) {
-      throw new Error("No se detectaron alimentos. Prueba con una foto mas clara.");
+      throw new Error("No se detectó comida o bebida con suficiente confianza. Prueba acercando la cámara, con mejor luz o centrando el plato.");
     }
 
     setDetectedFoods(foods);
     const hasLowConfidence = foods.some((food) => food.confidence < LOW_CONFIDENCE_THRESHOLD);
     setRequiresSaveConfirmation(hasLowConfidence);
     setSaveConfirmed(!hasLowConfidence);
-    if (payload.warning) setScanWarning(payload.warning);
+    const mergedWarning = [preWarning, payload.warning].filter(Boolean).join(" ");
+    if (mergedWarning) setScanWarning(mergedWarning);
     setAnalysisSource(payload.source || "gemini");
     setAnalysisModel(payload.model || "");
     setMealName(buildMealNameForCurrentTime(suggestMealName(foods), new Date()));
@@ -950,7 +946,7 @@ function ScanModal({
     <div className="overlay">
       <div className="modal">
         <div className="brand-mark">Sainz.ai</div>
-        <div className="section-head">
+        <div className="section-head scan-modal-header">
           <strong>{phase === "result" ? "Resultado del escaneo" : "Escanear comida"}</strong>
           <button type="button" className="btn secondary" onClick={onClose}>
             Cerrar
@@ -985,8 +981,8 @@ function ScanModal({
             <section className="card" style={{ marginBottom: "0.8rem" }}>
               <p style={{ marginTop: 0, fontWeight: 700, fontSize: "1.1rem" }}>Haz una foto de tu comida</p>
               <p className="muted">
-                Toma una foto o elige una imagen de tu galería. Modo precisión: Gemini detecta alimentos y gramos, y los
-                macros se calculan con base nutricional.
+                Toma una foto o elige una imagen de tu galería. Modo precisión: Gemini detecta alimentos y porciones
+                (g/ml), y los macros se calculan con base nutricional.
               </p>
               <div className="scan-actions">
                 <button type="button" className="btn primary" onClick={() => cameraInputRef.current?.click()}>
@@ -1016,7 +1012,7 @@ function ScanModal({
               <section className="card" style={{ borderColor: "rgba(255,110,110,0.45)" }}>
                 <strong style={{ color: "#ff8f8f" }}>No se pudo detectar comida</strong>
                 <p className="muted" style={{ marginBottom: 0 }}>
-                  {qualityGatePending && qualityGateMessage ? qualityGateMessage : error}
+                  {qualityGatePending && qualityGateMessage ? `${qualityGateMessage}${error ? ` ${error}` : ""}` : error}
                 </p>
                 <div style={{ marginTop: "0.65rem", display: "flex", gap: "0.55rem", flexWrap: "wrap" }}>
                   {qualityGatePending ? (
@@ -1170,7 +1166,7 @@ function ScanModal({
             <section className="card" style={{ marginTop: "0.8rem" }}>
               <div className="section-head">
                 <strong>Alimentos detectados</strong>
-                <span className="muted tiny">Edita gramos</span>
+                <span className="muted tiny">Edita porciones</span>
               </div>
               {foods.map((food) => (
                 <FoodResultRow
@@ -1183,12 +1179,12 @@ function ScanModal({
               ))}
             </section>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.7rem", marginTop: "0.8rem" }}>
+            <div className="scan-result-actions">
               {requiresSaveConfirmation ? (
                 <section className="card" style={{ gridColumn: "1 / -1", borderColor: "rgba(255,196,71,0.55)" }}>
                   <strong style={{ color: "var(--carbs)" }}>Revisión recomendada</strong>
                   <p className="muted" style={{ marginBottom: "0.5rem" }}>
-                    Hay alimentos con confianza baja. Revisa gramos y confirma antes de guardar.
+                    Hay alimentos con confianza baja. Revisa porciones y confirma antes de guardar.
                   </p>
                   <label className="confirm-row">
                     <input
@@ -1286,7 +1282,7 @@ function MealDetailModal({ meal, onClose }: { meal: MealLog; onClose: () => void
                   {Math.round(food.nutrition.fat)}g
                 </p>
               </div>
-              <div className="muted tiny">{Math.round(food.estimatedGrams)}g</div>
+              <div className="muted tiny">{formatPortion(food)}</div>
             </div>
           ))}
         </section>
@@ -1498,6 +1494,8 @@ function FoodResultRow({
   const confidencePct = Math.round(food.confidence * 100);
   const confidenceColor = confidencePct >= 85 ? "var(--neon)" : confidencePct >= 65 ? "var(--carbs)" : "var(--fat)";
   const foodHealth = evaluateFoodHealthScore(food);
+  const portionUnit = portionUnitForFood(food);
+  const portionStep = portionStepForFood(food);
   const [gramsText, setGramsText] = useState(String(Math.round(food.estimatedGrams)));
   const [editingName, setEditingName] = useState(false);
   const [nameText, setNameText] = useState(food.name);
@@ -1582,13 +1580,13 @@ function FoodResultRow({
           <button
             type="button"
             onClick={() => {
-              const next = Math.max(1, Math.round(food.estimatedGrams - 10));
+              const next = Math.max(1, Math.round(food.estimatedGrams - portionStep));
               onUpdateGrams(next);
               setGramsText(String(next));
             }}
             style={gramAdjustButtonStyle}
           >
-            -10
+            -{portionStep}
           </button>
           <input
             type="number"
@@ -1597,7 +1595,7 @@ function FoodResultRow({
             onChange={(e) => setGramsText(e.target.value)}
             onBlur={(e) => commitGrams(e.target.value)}
             style={{
-              width: 70,
+              width: 72,
               background: "#0f0f14",
               color: "white",
               border: "1px solid rgba(255,255,255,0.12)",
@@ -1609,16 +1607,16 @@ function FoodResultRow({
           <button
             type="button"
             onClick={() => {
-              const next = Math.round(food.estimatedGrams + 10);
+              const next = Math.round(food.estimatedGrams + portionStep);
               onUpdateGrams(next);
               setGramsText(String(next));
             }}
             style={gramAdjustButtonStyle}
           >
-            +10
+            +{portionStep}
           </button>
         </div>
-        <div className="tiny muted">gramos</div>
+        <div className="tiny muted">{portionUnit}</div>
         <span
           className="badge"
           style={{
@@ -1695,17 +1693,21 @@ type VisionFoodPayload = GeminiFoodItem & {
 };
 
 function mapGeminiFoodToDetectedFood(food: VisionFoodPayload): DetectedFood | null {
-  const detectedName = String(food.product_name ?? food.name ?? "").trim();
-  const name = resolveFoodAlias(detectedName) || detectedName;
-  if (!name) return null;
-
   const rawGrams = clamp(food.grams, 0, 2000);
   const aiCalories = clamp(food.calories, 0, 5000);
   const aiProtein = clamp(food.protein, 0, 500);
   const aiCarbs = clamp(food.carbs, 0, 500);
   const aiFat = clamp(food.fat, 0, 500);
+  const detectedName = String(food.product_name ?? food.name ?? "").trim();
+  const hasNutritionSignal = rawGrams > 0 || aiCalories > 0 || aiProtein > 0 || aiCarbs > 0 || aiFat > 0;
+  const fallbackName = hasNutritionSignal ? (Boolean(food.is_packaged) ? "Producto detectado" : "Alimento detectado") : "";
+  const resolvedName = detectedName || fallbackName;
+  const name = resolveFoodAlias(resolvedName) || resolvedName;
+  if (!name) return null;
+
   let confidence = Math.min(clamp(food.confidence, 0, 100), 97) / 100;
-  const category = categoryForFood(name);
+  const knownCategory = categoryForFood(name);
+  const category = knownCategory === "other" && isLikelyBeverageName(name) ? "beverage" : knownCategory;
   const baseGrams = rawGrams > 0 ? rawGrams : 100;
   const sanitizedGrams = sanitizePortionGrams(name, category, baseGrams);
   const personalizedGrams = applyPersonalPortionFactor(name, sanitizedGrams);
@@ -1826,7 +1828,7 @@ function formatTime(dateIso: string): string {
 function groupByDay(meals: MealLog[]): Array<{ key: string; title: string; meals: MealLog[] }> {
   const map = new Map<string, MealLog[]>();
   for (const meal of meals) {
-    const key = meal.date.slice(0, 10);
+    const key = localDayKey(meal.date);
     const current = map.get(key) ?? [];
     current.push(meal);
     map.set(key, current);
@@ -1834,11 +1836,22 @@ function groupByDay(meals: MealLog[]): Array<{ key: string; title: string; meals
 
   return [...map.entries()]
     .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-    .map(([key, list]) => ({
-      key,
-      title: labelForDay(list[0]?.date ?? key),
-      meals: list.sort((a, b) => (a.date < b.date ? 1 : -1))
-    }));
+    .map(([key, list]) => {
+      const sortedMeals = [...list].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      return {
+        key,
+        title: labelForDay(sortedMeals[0]?.date ?? key),
+        meals: sortedMeals
+      };
+    });
+}
+
+function localDayKey(dateIso: string): string {
+  const d = new Date(dateIso);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function labelForDay(dateIso: string): string {
@@ -2280,6 +2293,47 @@ function containsAny(value: string, words: string[]): boolean {
   return words.some((word) => value.includes(word));
 }
 
+function isLikelyBeverageName(name: string): boolean {
+  const key = normalizeFoodKey(name);
+  return containsAny(key, [
+    "agua",
+    "water",
+    "zumo",
+    "jugo",
+    "juice",
+    "refresco",
+    "soda",
+    "cola",
+    "cafe",
+    "coffee",
+    "te",
+    "tea",
+    "cerveza",
+    "beer",
+    "vino",
+    "wine",
+    "leche",
+    "milk",
+    "batido",
+    "smoothie",
+    "bebida",
+    "drink"
+  ]);
+}
+
+function portionUnitForFood(food: Pick<DetectedFood, "category" | "name">): "g" | "ml" {
+  if (food.category === "beverage") return "ml";
+  return isLikelyBeverageName(food.name) ? "ml" : "g";
+}
+
+function portionStepForFood(food: Pick<DetectedFood, "category" | "name">): number {
+  return portionUnitForFood(food) === "ml" ? 25 : 10;
+}
+
+function formatPortion(food: Pick<DetectedFood, "category" | "name" | "estimatedGrams">): string {
+  return `${Math.round(food.estimatedGrams)}${portionUnitForFood(food)}`;
+}
+
 function loadPortionMemory(): Record<string, number> {
   if (typeof window === "undefined") return {};
   try {
@@ -2583,3 +2637,9 @@ function generateId(): string {
   }
   return `id_${Math.random().toString(36).slice(2, 10)}`;
 }
+
+
+
+
+
+

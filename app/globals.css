@@ -570,6 +570,26 @@ select:focus-visible {
   box-shadow: var(--card-shadow);
 }
 
+.scan-modal-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 0.25rem 0 0.55rem;
+  margin-bottom: 0.45rem;
+  background: linear-gradient(180deg, rgba(20, 20, 27, 0.98) 0%, rgba(20, 20, 27, 0.84) 72%, rgba(20, 20, 27, 0) 100%);
+}
+
+.scan-result-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+  position: sticky;
+  bottom: -1rem;
+  padding: 0.75rem 0 0.2rem;
+  background: linear-gradient(180deg, rgba(17, 17, 23, 0) 0%, rgba(17, 17, 23, 0.9) 38%, rgba(17, 17, 23, 0.98) 100%);
+}
+
 .modal::-webkit-scrollbar {
   width: 8px;
 }
@@ -694,6 +714,18 @@ select:focus-visible {
     padding-bottom: calc(9.2rem + env(safe-area-inset-bottom, 0px));
   }
 
+  .overlay {
+    padding: 0;
+    align-items: end;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: 100dvh;
+    border-radius: 1.15rem 1.15rem 0 0;
+    padding: 0.9rem 0.85rem calc(1rem + env(safe-area-inset-bottom, 0px));
+  }
+
   .tabbar-inner {
     padding-inline: 0.7rem;
     padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
@@ -711,6 +743,16 @@ select:focus-visible {
 
   .scan-actions {
     grid-template-columns: 1fr;
+  }
+
+  .scan-result-actions {
+    grid-template-columns: 1fr;
+    bottom: calc(-0.85rem - env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .result-image {
+    height: 188px;
   }
 
   .meal-actions {

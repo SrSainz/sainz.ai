@@ -38,6 +38,7 @@ export async function assessImageQuality(file: File): Promise<{
   warnings: string[];
 }> {
   const img = await loadImage(file);
+  const minOriginalDimension = Math.min(img.width, img.height);
   const target = 192;
   const scale = Math.min(target / img.width, target / img.height, 1);
   const width = Math.max(1, Math.round(img.width * scale));
@@ -79,8 +80,8 @@ export async function assessImageQuality(file: File): Promise<{
   const warnings: string[] = [];
   let penalty = 0;
 
-  if (Math.min(width, height) < 220) {
-    warnings.push("La imagen tiene poca resolucion.");
+  if (minOriginalDimension < 480) {
+    warnings.push("La imagen original tiene poca resolucion.");
     penalty += 12;
   }
   if (mean < 55) {
