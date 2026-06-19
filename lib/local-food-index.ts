@@ -32,6 +32,7 @@ export type LocalFoodProduct = {
 
 let cachedPayload: LocalFoodIndexPayload | null | undefined;
 let cachedNameEntries: Array<[string, string]> | null = null;
+let cachedTokenIndex: Map<string, Array<[string, string]>> | null = null;
 
 export function lookupLocalProductByBarcode(barcodeRaw: string): LocalFoodProduct | null {
   const payload = loadLocalFoodIndex();
@@ -56,10 +57,7 @@ export function lookupLocalProductByText(queryRaw: string): LocalFoodProduct | n
     if (exact) return mapEntry(exactBarcode, exact);
   }
 
-  // Prefix fallback for slightly noisy OCR outputs.
-  const candidates = getNameEntries(payload)
-    .filter(([key]) => key.startsWith(query) || query.startsWith(key))
-    .slice(0, 24);
+  const candidates = collectNameCandidates(payload, query);
 
   let best: { barcode: string; score: number } | null = null;
   for (const [key, barcode] of candidates) {
@@ -95,6 +93,7 @@ function loadLocalFoodIndex(): LocalFoodIndexPayload | null {
     if (!fs.existsSync(filePath)) {
       cachedPayload = null;
       cachedNameEntries = null;
+      cachedTokenIndex = null;
       return null;
     }
     const raw = fs.readFileSync(filePath, "utf-8");
@@ -102,9 +101,11 @@ function loadLocalFoodIndex(): LocalFoodIndexPayload | null {
     const valid = parsed && typeof parsed === "object" && parsed.barcodes && parsed.names;
     cachedPayload = valid ? parsed : null;
     cachedNameEntries = null;
+    cachedTokenIndex = null;
   } catch {
     cachedPayload = null;
     cachedNameEntries = null;
+    cachedTokenIndex = null;
   }
   return cachedPayload;
 }
@@ -114,6 +115,54 @@ function getNameEntries(payload: LocalFoodIndexPayload): Array<[string, string]>
     cachedNameEntries = Object.entries(payload.names);
   }
   return cachedNameEntries;
+}
+
+function getTokenIndex(payload: LocalFoodIndexPayload): Map<string, Array<[string, string]>> {
+  if (cachedTokenIndex) return cachedTokenIndex;
+
+  const index = new Map<string, Array<[string, string]>>();
+  for (const entry of getNameEntries(payload)) {
+    const [key] = entry;
+    for (const token of tokenizeKey(key)) {
+      const bucket = index.get(token);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        index.set(token, [entry]);
+      }
+    }
+  }
+  cachedTokenIndex = index;
+  return index;
+}
+
+function collectNameCandidates(payload: LocalFoodIndexPayload, query: string): Array<[string, string]> {
+  const tokenIndex = getTokenIndex(payload);
+  const byId = new Map<string, [string, string]>();
+
+  for (const token of tokenizeKey(query)) {
+    const bucket = tokenIndex.get(token);
+    if (!bucket) continue;
+    for (const candidate of bucket.slice(0, 80)) {
+      const [key, barcode] = candidate;
+      byId.set(`${key}\0${barcode}`, candidate);
+    }
+  }
+
+  if (byId.size > 0) {
+    return [...byId.values()].slice(0, 96);
+  }
+
+  // Prefix fallback for very short or partially-read OCR outputs.
+  return getNameEntries(payload)
+    .filter(([key]) => key.startsWith(query) || query.startsWith(key))
+    .slice(0, 24);
+}
+
+function tokenizeKey(text: string): string[] {
+  return normalizeKey(text)
+    .split(" ")
+    .filter((token) => token.length >= 2);
 }
 
 function cleanBarcode(value: string): string {
