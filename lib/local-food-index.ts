@@ -31,6 +31,7 @@ export type LocalFoodProduct = {
 };
 
 let cachedPayload: LocalFoodIndexPayload | null | undefined;
+let cachedNameEntries: Array<[string, string]> | null = null;
 
 export function lookupLocalProductByBarcode(barcodeRaw: string): LocalFoodProduct | null {
   const payload = loadLocalFoodIndex();
@@ -56,7 +57,7 @@ export function lookupLocalProductByText(queryRaw: string): LocalFoodProduct | n
   }
 
   // Prefix fallback for slightly noisy OCR outputs.
-  const candidates = Object.entries(payload.names)
+  const candidates = getNameEntries(payload)
     .filter(([key]) => key.startsWith(query) || query.startsWith(key))
     .slice(0, 24);
 
@@ -93,16 +94,26 @@ function loadLocalFoodIndex(): LocalFoodIndexPayload | null {
   try {
     if (!fs.existsSync(filePath)) {
       cachedPayload = null;
+      cachedNameEntries = null;
       return null;
     }
     const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw) as LocalFoodIndexPayload;
     const valid = parsed && typeof parsed === "object" && parsed.barcodes && parsed.names;
     cachedPayload = valid ? parsed : null;
+    cachedNameEntries = null;
   } catch {
     cachedPayload = null;
+    cachedNameEntries = null;
   }
   return cachedPayload;
+}
+
+function getNameEntries(payload: LocalFoodIndexPayload): Array<[string, string]> {
+  if (!cachedNameEntries) {
+    cachedNameEntries = Object.entries(payload.names);
+  }
+  return cachedNameEntries;
 }
 
 function cleanBarcode(value: string): string {
